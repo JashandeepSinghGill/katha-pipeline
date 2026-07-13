@@ -32,3 +32,31 @@ def test_scan_once_respects_the_daily_throttle(db, settings, tmp_path, monkeypat
 
     assert len(watcher.scan_once(db, settings)) == 2
     assert len(watcher.scan_once(db, settings)) == 2  # registration alone doesn't consume quota
+
+
+@pytest.mark.db
+def test_scan_once_does_not_rehash_already_registered_files(
+    db, settings, tmp_path, monkeypatch
+):
+    for i in range(3):
+        (tmp_path / f"k{i}.wav").write_bytes(b"x")
+    monkeypatch.setattr(settings, "watch_dir", tmp_path)
+    with db.cursor() as cur:
+        cur.execute("UPDATE settings SET value = '10' WHERE key = 'files_per_day'")
+    db.commit()
+
+    calls = []
+    original_sha256_file = watcher.sha256_file
+
+    def counting_spy(path):
+        calls.append(path)
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(watcher, "sha256_file", counting_spy)
+
+    assert len(watcher.scan_once(db, settings)) == 3
+    assert len(calls) == 3  # first pass: every file is new, all 3 hashed
+
+    calls.clear()
+    assert len(watcher.scan_once(db, settings)) == 0
+    assert len(calls) == 0  # second pass: all 3 already registered, none re-hashed

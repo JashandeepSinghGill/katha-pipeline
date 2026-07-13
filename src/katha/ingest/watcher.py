@@ -31,10 +31,21 @@ def sha256_file(path: Path) -> str:
 
 
 def scan_once(conn: psycopg.Connection, settings: Settings) -> list[int]:
-    """Register new clips, newest quota first. Idempotent — re-running is a no-op."""
+    """Register new clips, up to the daily quota, in sorted filename order.
+
+    Idempotent — re-running over already-registered files is a no-op and does
+    not re-hash them: already-registered source paths are looked up once
+    up front and skipped before hashing. register_clip's
+    ON CONFLICT DO NOTHING remains as the race-safety backstop for the case
+    where a file is registered concurrently between that lookup and the
+    insert.
+    """
     quota = repo.get_setting_int(conn, "files_per_day", 3)
+    known = repo.known_source_paths(conn)
     registered: list[int] = []
     for path in discover(settings.watch_dir):
+        if str(path) in known:
+            continue
         if len(registered) >= quota:
             break
         clip_id = repo.register_clip(conn, path, path.stem, sha256_file(path))

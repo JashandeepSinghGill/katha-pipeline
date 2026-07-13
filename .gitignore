@@ -10,3 +10,4 @@ work/
 .pytest_cache/
 /data/
 *.egg-info/
+.aidex/
