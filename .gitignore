@@ -8,3 +8,5 @@ node_modules/
 .superpowers/
 work/
 .pytest_cache/
+/data/
+*.egg-info/

@@ -1,0 +1,25 @@
+services:
+  db:
+    image: pgvector/pgvector:0.8.5-pg17-trixie
+    container_name: katha-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: katha
+      POSTGRES_USER: katha
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U katha -d katha"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: >
+      postgres
+      -c shared_buffers=1GB
+      -c maintenance_work_mem=2GB
+
+volumes:
+  pgdata:
