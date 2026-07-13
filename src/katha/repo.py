@@ -3,6 +3,9 @@ from pathlib import Path
 
 import psycopg
 
+from katha.stages.assemble import role_for
+from katha.stages.types import AssembledSegment
+
 # Transaction contract: every function in this module opens and closes its own
 # transaction on the connection it is given (commit on write, rollback on a
 # read-only SELECT or a no-op ON CONFLICT branch). This keeps db.connect()'s
@@ -93,6 +96,91 @@ def claim_next_job(conn: psycopg.Connection) -> dict | None:
         row = cur.fetchone()
     conn.commit()
     return row
+
+
+def get_clip(conn: psycopg.Connection, clip_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM clips WHERE id = %s", (clip_id,))
+        row = cur.fetchone()
+    conn.rollback()
+    return row
+
+
+def set_clip_meta(
+    conn: psycopg.Connection,
+    clip_id: int,
+    *,
+    duration_seconds: float | None = None,
+    reciter_speaker_id: str | None = None,
+) -> None:
+    sets, params = [], []
+    for column, value in (
+        ("duration_seconds", duration_seconds),
+        ("reciter_speaker_id", reciter_speaker_id),
+    ):
+        if value is not None:
+            sets.append(f"{column} = %s")
+            params.append(value)
+    if not sets:
+        return
+    params.append(clip_id)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE clips SET {', '.join(sets)} WHERE id = %s", params)
+    conn.commit()
+
+
+def add_audio_file(
+    conn: psycopg.Connection, clip_id: int, kind: str, path: Path, sample_rate: int | None
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO audio_files (clip_id, kind, path, sample_rate)"
+            " VALUES (%s, %s, %s, %s)"
+            " ON CONFLICT (clip_id, kind) DO UPDATE SET path = EXCLUDED.path,"
+            " sample_rate = EXCLUDED.sample_rate RETURNING id",
+            (clip_id, kind, str(path), sample_rate),
+        )
+        audio_id = cur.fetchone()["id"]
+    conn.commit()
+    return audio_id
+
+
+def save_segments(
+    conn: psycopg.Connection,
+    clip_id: int,
+    segments: list[AssembledSegment],
+    reciter_id: str | None,
+) -> None:
+    """Replace this clip's segments wholesale, so a retried assemble stage is idempotent."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM segments WHERE clip_id = %s", (clip_id,))  # words cascade
+        for seg in segments:
+            cur.execute(
+                "INSERT INTO segments (clip_id, idx, speaker_id, speaker_role,"
+                " start_ms, end_ms, text_pa, align_score, timing_source)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (
+                    clip_id, seg.idx, seg.speaker_id,
+                    role_for(seg.speaker_id, reciter_id),
+                    seg.start_ms, seg.end_ms, seg.text_pa,
+                    seg.align_score, seg.timing_source,
+                ),
+            )
+            segment_id = cur.fetchone()["id"]
+            for widx, w in enumerate(seg.words):
+                cur.execute(
+                    "INSERT INTO words (segment_id, idx, text, start_ms, end_ms, score)"
+                    " VALUES (%s,%s,%s,%s,%s,%s)",
+                    (segment_id, widx, w.text, _ms(w.start_s), _ms(w.end_s), w.score),
+                )
+        cur.execute(
+            "UPDATE clips SET reciter_speaker_id = %s WHERE id = %s", (reciter_id, clip_id)
+        )
+    conn.commit()
+
+
+def _ms(seconds: float) -> int:
+    return int(round(seconds * 1000))
 
 
 def set_job(
