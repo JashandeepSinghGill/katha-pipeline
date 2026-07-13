@@ -1,0 +1,10 @@
+[Unit]
+Description=Katha pipeline worker (drain the queue once)
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=katha
+WorkingDirectory=/opt/katha
+EnvironmentFile=/opt/katha/.env
+ExecStart=/opt/katha/.venv/bin/python -m katha.worker
