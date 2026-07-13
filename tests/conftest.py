@@ -19,7 +19,16 @@ TABLES = ("words", "segments", "jobs", "audio_files", "clips")
 
 @pytest.fixture(scope="session")
 def settings() -> Settings:
-    return Settings(_env_file=None, database_url=TEST_DB_URL)
+    # _env_file=None keeps this fixture from picking up unrelated values from a
+    # dev .env (e.g. a live Sarvam key). `device` is the exception: it has no
+    # safe universal default (Settings defaults to "cuda"), so pull it from the
+    # real environment (falling back to "cpu" for this Windows/no-GPU dev box)
+    # instead of silently forcing a dtype branch that doesn't match the machine.
+    return Settings(
+        _env_file=None,
+        database_url=TEST_DB_URL,
+        device=os.environ.get("KATHA_DEVICE", "cpu"),
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)
