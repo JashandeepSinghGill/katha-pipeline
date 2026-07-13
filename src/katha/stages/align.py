@@ -39,6 +39,9 @@ class Aligner:
         )
 
     def align(self, wav: Path, text: str) -> list[AlignedWord]:
+        if not text.strip():
+            raise AlignError("nothing to align: transcript is empty")
+
         from ctc_forced_aligner import (
             generate_emissions,
             get_alignments,
@@ -47,9 +50,6 @@ class Aligner:
             postprocess_results,
             preprocess_text,
         )
-
-        if not text.strip():
-            raise AlignError("nothing to align: transcript is empty")
 
         # load_audio shells out to ffmpeg and resamples to 16 kHz mono for us.
         waveform = load_audio(str(wav), self.model.dtype, self.model.device)
