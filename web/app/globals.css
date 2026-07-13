@@ -1,0 +1,52 @@
+:root {
+  --bg: #12100e;
+  --panel: #1c1917;
+  --line: #33302c;
+  --ink: #ece7e1;
+  --muted: #9a938b;
+  --reciter: #d4a24c;
+  --kathakar: #7fa8c9;
+  --warn: #c96f5c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.6 system-ui, sans-serif;
+}
+
+header {
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
+header a { color: var(--ink); text-decoration: none; }
+
+main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+
+/* Gurmukhi needs more line height and a font that actually has the glyphs. */
+.gurmukhi {
+  font-family: 'Noto Sans Gurmukhi', 'Nirmala UI', sans-serif;
+  font-size: 19px;
+  line-height: 2;
+}
+
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; }
+th { color: var(--muted); font-weight: 500; font-size: 13px; }
+
+.pill {
+  display: inline-block; padding: 2px 9px; border-radius: 999px;
+  font-size: 12px; border: 1px solid var(--line);
+}
+.pill.failed { color: var(--warn); border-color: var(--warn); }
+.pill.done { color: var(--reciter); border-color: var(--reciter); }
+
+button {
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit;
+}
+button:hover { border-color: var(--muted); }
