@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     denoise_model: str = "DeepFilterNet3"
 
     max_audio_seconds: int = 7200
+    # 4h: a 2h file denoising slower than realtime on CPU
+    subprocess_timeout_seconds: int = 14400
     max_attempts: int = 3
 
 
