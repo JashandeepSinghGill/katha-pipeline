@@ -101,3 +101,29 @@ def test_save_segments_replaces_a_previous_run(db):
     with db.cursor() as cur:
         cur.execute("SELECT count(*) AS n FROM segments WHERE clip_id = %s", (clip_id,))
         assert cur.fetchone()["n"] == 2
+        # words cascade off segments on DELETE; if the cascade silently failed
+        # this second save would leave 10 orphaned/doubled rows instead of 5.
+        cur.execute("SELECT count(*) AS n FROM words")
+        assert cur.fetchone()["n"] == 5
+
+
+@pytest.mark.db
+def test_save_segments_with_no_reciter_persists_unknown_role(db):
+    # Sarvam's beta diarization can collapse to a single speaker, so
+    # infer_reciter_speaker_id returns None and the caller passes
+    # reciter_id=None through to save_segments. This is the realistic path
+    # that stamps speaker_role='unknown' (which must satisfy the segments
+    # table's speaker_role CHECK constraint) and clears reciter_speaker_id.
+    clip_id = repo.register_clip(db, Path("/a/k.mp3"), "k", "abc")
+    segments = assemble.assemble_segments(ENTRIES, WORDS)
+    repo.save_segments(db, clip_id, segments, reciter_id=None)
+
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT speaker_role FROM segments WHERE clip_id = %s ORDER BY idx",
+            (clip_id,),
+        )
+        rows = cur.fetchall()
+
+    assert [r["speaker_role"] for r in rows] == ["unknown", "unknown"]
+    assert repo.get_clip(db, clip_id)["reciter_speaker_id"] is None

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import psycopg
 
-from katha.stages.assemble import role_for
+from katha.stages.assemble import _ms, role_for
 from katha.stages.types import AssembledSegment
 
 # Transaction contract: every function in this module opens and closes its own
@@ -177,10 +177,6 @@ def save_segments(
             "UPDATE clips SET reciter_speaker_id = %s WHERE id = %s", (reciter_id, clip_id)
         )
     conn.commit()
-
-
-def _ms(seconds: float) -> int:
-    return int(round(seconds * 1000))
 
 
 def set_job(
