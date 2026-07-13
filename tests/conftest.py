@@ -17,17 +17,33 @@ TEST_DB_URL = os.environ.get(
 TABLES = ("words", "segments", "jobs", "audio_files", "clips")
 
 
+def _default_device() -> str:
+    """Tests must not take the float16/CUDA branch on a GPU-less box, and must not
+    silently validate only CPU on a GPU host. Prefer an explicit KATHA_DEVICE, else
+    detect. torch is an optional extra, so the import is guarded."""
+    explicit = os.environ.get("KATHA_DEVICE")
+    if explicit:
+        return explicit
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
+
+
 @pytest.fixture(scope="session")
 def settings() -> Settings:
     # _env_file=None keeps this fixture from picking up unrelated values from a
     # dev .env (e.g. a live Sarvam key). `device` is the exception: it has no
     # safe universal default (Settings defaults to "cuda"), so pull it from the
-    # real environment (falling back to "cpu" for this Windows/no-GPU dev box)
-    # instead of silently forcing a dtype branch that doesn't match the machine.
+    # real environment (falling back to autodetection, and then "cpu" for this
+    # Windows/no-GPU dev box) instead of silently forcing a dtype branch that
+    # doesn't match the machine.
     return Settings(
         _env_file=None,
         database_url=TEST_DB_URL,
-        device=os.environ.get("KATHA_DEVICE", "cpu"),
+        device=_default_device(),
     )
 
 

@@ -29,6 +29,20 @@ def test_to_aligned_words_rejects_empty_alignment():
         align.to_aligned_words([])
 
 
+@pytest.mark.parametrize("text", ["", "   "])
+def test_align_rejects_empty_transcript(settings, text):
+    """.align()'s empty-text guard fires before any audio loading. Constructing a
+    real Aligner would load the 1.2GB model, so bypass __init__ entirely and call
+    the method on a bare instance. The path is nonexistent to prove the guard
+    really does run before file access — a different error here would mean the
+    guard moved past the check that matters.
+    """
+    aligner = object.__new__(align.Aligner)
+    aligner.settings = settings
+    with pytest.raises(align.AlignError, match="empty"):
+        aligner.align(Path("/nonexistent.wav"), text)
+
+
 def _write_synthetic_wav(path: Path, seconds: float = 3.0, sr: int = 16000) -> None:
     """A few seconds of shaped noise, 16 kHz mono — enough for ctc-forced-aligner's
     ffmpeg + feature-extraction pipeline to run end to end. The audio carries no
@@ -74,7 +88,12 @@ def test_align_returns_monotonic_gurmukhi_words(settings, tmp_path):
 
     try:
         aligner = align.Aligner(settings)
-    except Exception as exc:  # model unavailable (e.g. no network for the HF download)
+    except (ImportError, OSError) as exc:
+        # Environmental only: extras not installed, or the model can't be fetched
+        # from HuggingFace (huggingface_hub/requests connection errors surface as
+        # OSError). Anything else (bad model ID, changed load_alignment_model
+        # signature, wrong dtype, bad align_batch_size type, ...) is a genuine
+        # regression and must fail loudly, not be swallowed as a skip.
         pytest.skip(f"forced-alignment model unavailable: {exc}")
 
     words = aligner.align(wav, text)
