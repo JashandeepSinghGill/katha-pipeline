@@ -1,3 +1,4 @@
+import psycopg
 import pytest
 
 
@@ -20,7 +21,7 @@ def test_segment_rejects_unknown_speaker_role(db):
             ("/a.mp3", "a", "x"),
         )
         clip_id = cur.fetchone()["id"]
-        with pytest.raises(Exception):
+        with pytest.raises(psycopg.errors.CheckViolation):
             cur.execute(
                 "INSERT INTO segments (clip_id, idx, speaker_role, start_ms, end_ms, text_pa)"
                 " VALUES (%s,0,'narrator',0,10,'x')",

@@ -1,11 +1,15 @@
 import os
 import subprocess
+import sys
 
 import pytest
 
 from katha.config import Settings
 from katha.db import connect
 
+# The fallback password here must match POSTGRES_PASSWORD in your local .env
+# (NOT the `change-me` placeholder in .env.example). Set KATHA_TEST_DATABASE_URL
+# to override this whole URL if your local setup differs.
 TEST_DB_URL = os.environ.get(
     "KATHA_TEST_DATABASE_URL",
     "postgresql://katha:katha@localhost:5432/katha_test",
@@ -21,7 +25,9 @@ def settings() -> Settings:
 @pytest.fixture(scope="session", autouse=True)
 def _migrate(settings):
     env = {**os.environ, "KATHA_DATABASE_URL": settings.database_url}
-    subprocess.run(["alembic", "upgrade", "head"], env=env, check=True)
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"], env=env, check=True
+    )
 
 
 @pytest.fixture
