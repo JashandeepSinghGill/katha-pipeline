@@ -117,11 +117,7 @@ class Pipeline:
         return NEXT_STAGE[job["stage"]]
 
     def run_once(self) -> bool:
-        if self._quota_left() <= 0:
-            log.info("daily throttle reached; idling")
-            return False
-
-        job = repo.claim_next_job(self.conn)
+        job = repo.claim_next_job(self.conn, self._quota_left())
         if job is None:
             return False
 
@@ -129,11 +125,17 @@ class Pipeline:
             next_stage = self.run_stage(job)
         except Exception as exc:  # noqa: BLE001 — the stage boundary is the retry boundary
             exhausted = job["attempts"] >= self.settings.max_attempts
+            status = "failed" if exhausted else "queued"
             log.exception("clip %s failed in %s", job["clip_id"], job["stage"])
+            if exhausted:
+                # Terminal failure: this clip won't be retried without an admin
+                # requeue, so stop holding its in-memory stage output.
+                self._entries.pop(job["clip_id"], None)
+                self._words.pop(job["clip_id"], None)
             repo.set_job(
                 self.conn,
                 job["id"],
-                status="failed" if exhausted else "queued",
+                status=status,
                 last_error=f"{job['stage']}: {exc}",
             )
             return True
@@ -151,6 +153,13 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
     with connect(settings) as conn:
+        older_than = datetime.now(timezone.utc) - timedelta(
+            minutes=settings.stale_running_minutes
+        )
+        reclaimed = repo.reclaim_stale_jobs(conn, older_than)
+        if reclaimed:
+            log.warning("reclaimed %d stale running job(s) stuck in 'running'", reclaimed)
+
         new = scan_once(conn, settings)
         log.info("registered %d new clip(s)", len(new))
         pipeline = Pipeline(settings, conn)

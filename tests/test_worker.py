@@ -128,3 +128,57 @@ def test_the_daily_throttle_stops_new_work(db, settings, pipeline):
     repo.register_clip(db, Path("/a/k.mp3"), "k", "abc")
 
     assert pipeline.run_once() is False
+
+
+@pytest.mark.db
+def test_every_clip_up_to_the_daily_quota_reaches_done_while_the_next_is_withheld(
+    db, settings, pipeline
+):
+    """Regression test for the critical throttle bug: the quota must gate only
+    the *start* of a new clip, never the continuation of one already started.
+
+    files_per_day new clips are registered together (the normal case — the
+    watcher registers up to files_per_day per scan). Every one of them must
+    fully drain through all four stages to completion in the same day,
+    because each only ever consumes one quota unit (stamped once by
+    claim_next_job's COALESCE(started_at, now())), regardless of how many of
+    its four stages get claimed. A clip registered after the quota is spent
+    must not be started at all.
+    """
+    quota = repo.get_setting_int(db, "files_per_day", 3)
+    clip_ids = [
+        repo.register_clip(db, Path(f"/a/k{i}.mp3"), f"k{i}", f"sha{i}")
+        for i in range(quota)
+    ]
+
+    while pipeline.run_once():
+        pass
+
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT clip_id, stage, status FROM jobs WHERE clip_id = ANY(%s)",
+            (clip_ids,),
+        )
+        jobs_by_clip = {row["clip_id"]: row for row in cur.fetchall()}
+
+    for clip_id in clip_ids:
+        job = jobs_by_clip[clip_id]
+        assert job["stage"] == "complete"
+        assert job["status"] == "done"
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) AS n FROM segments WHERE clip_id = %s", (clip_id,)
+            )
+            assert cur.fetchone()["n"] > 0
+
+    fourth_clip_id = repo.register_clip(db, Path("/a/k-extra.mp3"), "k-extra", "sha-extra")
+
+    assert pipeline.run_once() is False  # quota spent; nothing left to claim
+
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT stage, started_at FROM jobs WHERE clip_id = %s", (fourth_clip_id,)
+        )
+        row = cur.fetchone()
+    assert row["stage"] == "prepare"
+    assert row["started_at"] is None

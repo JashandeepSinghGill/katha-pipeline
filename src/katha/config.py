@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # 4h: a 2h file denoising slower than realtime on CPU
     subprocess_timeout_seconds: int = 14400
     max_attempts: int = 3
+    # 6h: must exceed subprocess_timeout_seconds (4h) so a legitimately long-running
+    # denoise/alignment stage is never yanked out from under a live worker.
+    stale_running_minutes: int = 360
 
 
 def get_settings() -> Settings:

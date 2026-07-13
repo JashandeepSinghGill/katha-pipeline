@@ -67,7 +67,7 @@ def known_source_paths(conn: psycopg.Connection) -> set[str]:
     return {row["source_path"] for row in rows}
 
 
-def claim_next_job(conn: psycopg.Connection) -> dict | None:
+def claim_next_job(conn: psycopg.Connection, quota_left: int) -> dict | None:
     """Atomically claim one queued job. SKIP LOCKED makes this safe for >1 worker.
 
     Only matches status='queued'. 'failed' is a terminal state reached once
@@ -76,9 +76,18 @@ def claim_next_job(conn: psycopg.Connection) -> dict | None:
     retry path) and picked up normally on the next claim. A job that is
     truly 'failed' stays that way until an admin explicitly requeues it
     (requeue_job, Task 8), which resets it back to 'queued'.
+
+    The daily throttle gates only the *start* of a new clip, never the
+    continuation of one already started: a job with started_at IS NOT NULL
+    has already paid its one quota unit (started_at is stamped exactly once
+    per clip, via the COALESCE below), so it is always eligible to be
+    claimed. A job that has never started (started_at IS NULL) is only
+    eligible when quota_left > 0. In-flight jobs are ordered ahead of new
+    ones so the pipeline drains what it started rather than fanning out.
     """
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(
+            """
             UPDATE jobs SET
                 status     = 'running',
                 attempts   = attempts + 1,
@@ -87,15 +96,40 @@ def claim_next_job(conn: psycopg.Connection) -> dict | None:
             WHERE id = (
                 SELECT id FROM jobs
                 WHERE status = 'queued' AND stage <> 'complete'
-                ORDER BY created_at
+                  AND (started_at IS NOT NULL OR %s > 0)
+                ORDER BY (started_at IS NULL), created_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
             RETURNING id, clip_id, stage, attempts, sarvam_job_id
-        """)
+            """,
+            (quota_left,),
+        )
         row = cur.fetchone()
     conn.commit()
     return row
+
+
+def reclaim_stale_jobs(conn: psycopg.Connection, older_than: datetime) -> int:
+    """Requeue jobs stuck in 'running' because the worker died mid-stage
+    (OOM, host reboot, a systemd timeout) between claim_next_job's commit
+    and the terminating set_job. Without this, such a job matches neither
+    claim_next_job (status <> 'queued') nor any other transition, and
+    silently vanishes from the pipeline forever.
+
+    Matches status='running' AND updated_at < older_than. Does not reset
+    attempts — max_attempts must still bound the total number of tries, or a
+    crash-looping clip would retry forever.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE jobs SET status = 'queued', updated_at = now()"
+            " WHERE status = 'running' AND updated_at < %s",
+            (older_than,),
+        )
+        n = cur.rowcount
+    conn.commit()
+    return n
 
 
 def get_clip(conn: psycopg.Connection, clip_id: int) -> dict | None:
