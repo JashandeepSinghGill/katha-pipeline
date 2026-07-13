@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+node_modules/
+.next/
+.superpowers/
+work/
+.pytest_cache/
