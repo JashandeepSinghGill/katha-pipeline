@@ -9,6 +9,19 @@ class AsrError(RuntimeError):
     pass
 
 
+def _required_float(entry: dict, field: str, idx: int) -> float:
+    try:
+        value = entry[field]
+    except KeyError:
+        raise AsrError(f"entry {idx}: missing required field '{field}'") from None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise AsrError(
+            f"entry {idx}: field '{field}' is not a valid number: {value!r}"
+        ) from None
+
+
 def parse_diarized(payload: dict) -> list[DiarizedEntry]:
     entries = (payload.get("diarized_transcript") or {}).get("entries")
     if not entries:
@@ -20,10 +33,10 @@ def parse_diarized(payload: dict) -> list[DiarizedEntry]:
         DiarizedEntry(
             speaker_id=str(e.get("speaker_id", "0")),
             text=(e.get("transcript") or "").strip(),
-            start_s=float(e["start_time_seconds"]),
-            end_s=float(e["end_time_seconds"]),
+            start_s=_required_float(e, "start_time_seconds", i),
+            end_s=_required_float(e, "end_time_seconds", i),
         )
-        for e in entries
+        for i, e in enumerate(entries)
     ]
     return [e for e in parsed if e.text]
 
@@ -62,6 +75,12 @@ class SarvamAsr:
         failed = (job.get_file_results() or {}).get("failed") or []
         if failed:
             raise AsrError(f"Sarvam rejected the file: {failed}")
+
+        # A retried stage reuses this same out_dir. Clear any JSON left behind
+        # by a prior attempt so `sorted(...)[0]` below can't pick up a stale
+        # result instead of this run's.
+        for stale in out_dir.glob("*.json"):
+            stale.unlink()
 
         job.download_outputs(output_dir=str(out_dir))
         outputs = sorted(out_dir.glob("*.json"))
