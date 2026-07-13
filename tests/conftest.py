@@ -62,5 +62,13 @@ def db(settings):
     conn.rollback()
     with conn.cursor() as cur:
         cur.execute(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE")
+        # `settings` isn't in TABLES (it's not per-clip state to wipe, it's
+        # config) but tests do mutate it (e.g. files_per_day) and never
+        # restore it, which otherwise leaks into every later test in the
+        # session. Reset it deterministically to the migration's seed row
+        # so a test that *adds* a key doesn't leak either, in the same
+        # teardown transaction as the truncate above.
+        cur.execute("DELETE FROM settings")
+        cur.execute("INSERT INTO settings (key, value) VALUES ('files_per_day', '3')")
     conn.commit()
     conn.close()

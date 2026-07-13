@@ -145,7 +145,12 @@ def test_every_clip_up_to_the_daily_quota_reaches_done_while_the_next_is_withhel
     its four stages get claimed. A clip registered after the quota is spent
     must not be started at all.
     """
-    quota = repo.get_setting_int(db, "files_per_day", 3)
+    quota = 3
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE settings SET value = %s WHERE key = 'files_per_day'", (str(quota),)
+        )
+    db.commit()
     clip_ids = [
         repo.register_clip(db, Path(f"/a/k{i}.mp3"), f"k{i}", f"sha{i}")
         for i in range(quota)
