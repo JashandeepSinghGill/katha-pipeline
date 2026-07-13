@@ -236,3 +236,86 @@ def set_job(
     with conn.cursor() as cur:
         cur.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id = %s", params)
     conn.commit()
+
+
+def list_clips(conn: psycopg.Connection) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT c.id, c.title, c.duration_seconds, c.reciter_speaker_id,
+                   j.stage, j.status, j.attempts, j.last_error,
+                   (SELECT count(*) FROM segments s WHERE s.clip_id = c.id) AS segment_count,
+                   (SELECT count(*) FROM segments s
+                     WHERE s.clip_id = c.id AND s.timing_source = 'asr') AS loose_count
+            FROM clips c JOIN jobs j ON j.clip_id = c.id
+            ORDER BY c.created_at DESC
+        """)
+        rows = cur.fetchall()
+    conn.rollback()
+    return rows
+
+
+def list_segments(conn: psycopg.Connection, clip_id: int) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT s.id, s.idx, s.speaker_id, s.speaker_role, s.start_ms, s.end_ms,
+                   s.text_pa, s.align_score, s.timing_source, s.edited,
+                   COALESCE(
+                       (SELECT json_agg(json_build_object(
+                            'text', w.text, 'start_ms', w.start_ms, 'end_ms', w.end_ms
+                        ) ORDER BY w.idx)
+                        FROM words w WHERE w.segment_id = s.id),
+                       '[]'::json
+                   ) AS words
+            FROM segments s WHERE s.clip_id = %s ORDER BY s.idx
+        """, (clip_id,))
+        rows = cur.fetchall()
+    conn.rollback()
+    return rows
+
+
+def get_audio_file(conn: psycopg.Connection, clip_id: int, kind: str) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM audio_files WHERE clip_id = %s AND kind = %s", (clip_id, kind)
+        )
+        row = cur.fetchone()
+    conn.rollback()
+    return row
+
+
+def update_segment_text(conn: psycopg.Connection, segment_id: int, text_pa: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE segments SET text_pa = %s, edited = true WHERE id = %s",
+            (text_pa, segment_id),
+        )
+        changed = cur.rowcount == 1
+    conn.commit()
+    return changed
+
+
+def set_reciter(conn: psycopg.Connection, clip_id: int, reciter_id: str | None) -> None:
+    """Admin override. Re-derives every segment's role from the new reciter id."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE clips SET reciter_speaker_id = %s WHERE id = %s", (reciter_id, clip_id)
+        )
+        cur.execute("""
+            UPDATE segments SET speaker_role = CASE
+                WHEN %s::text IS NULL   THEN 'unknown'
+                WHEN speaker_id = %s    THEN 'reciter'
+                ELSE 'kathakar'
+            END
+            WHERE clip_id = %s
+        """, (reciter_id, reciter_id, clip_id))
+    conn.commit()
+
+
+def requeue_job(conn: psycopg.Connection, clip_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE jobs SET status = 'queued', attempts = 0, last_error = NULL,"
+            " updated_at = now() WHERE clip_id = %s AND status = 'failed'",
+            (clip_id,),
+        )
+    conn.commit()
