@@ -73,8 +73,10 @@ def patch_segment(segment_id: int, patch: SegmentPatch, conn=Depends(get_conn)):
 
 @app.post("/api/clips/{clip_id}/retry")
 def retry_clip(clip_id: int, conn=Depends(get_conn)):
-    repo.requeue_job(conn, clip_id)
-    return {"ok": True}
+    if repo.get_clip(conn, clip_id) is None:
+        raise HTTPException(404, "no such clip")
+    requeued = repo.requeue_job(conn, clip_id)
+    return {"ok": True, "requeued": requeued}
 
 
 @app.get("/api/audio/{clip_id}")

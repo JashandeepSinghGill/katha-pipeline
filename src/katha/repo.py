@@ -311,11 +311,17 @@ def set_reciter(conn: psycopg.Connection, clip_id: int, reciter_id: str | None) 
     conn.commit()
 
 
-def requeue_job(conn: psycopg.Connection, clip_id: int) -> None:
+def requeue_job(conn: psycopg.Connection, clip_id: int) -> bool:
+    """Reset a failed job back to queued. No-op (returns False) on any job that
+    is not currently 'failed' — in particular 'queued' and 'running' must be
+    left completely untouched, since 'failed' is only reached once max_attempts
+    is exhausted and this is the sole path that clears it."""
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE jobs SET status = 'queued', attempts = 0, last_error = NULL,"
             " updated_at = now() WHERE clip_id = %s AND status = 'failed'",
             (clip_id,),
         )
+        requeued = cur.rowcount == 1
     conn.commit()
+    return requeued
