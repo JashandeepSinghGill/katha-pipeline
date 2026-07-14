@@ -198,3 +198,39 @@ def test_known_source_paths_returns_registered_paths_only(db):
 def test_known_source_paths_does_not_leave_an_open_transaction(db):
     repo.known_source_paths(db)
     assert db.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+
+
+# --- H2: last_error must be explicitly clearable without breaking the "only
+# update what was provided" convention for every other set_job caller --------
+
+
+@pytest.mark.db
+def test_set_job_clear_error_nulls_last_error(db):
+    repo.register_clip(db, Path("/audio/k.mp3"), "k", "abc")
+    job = repo.claim_next_job(db, quota_left=1, backoff_seconds=0)
+    repo.set_job(db, job["id"], status="queued", last_error="align: CUDA OOM")
+    with db.cursor() as cur:
+        cur.execute("SELECT last_error FROM jobs WHERE id = %s", (job["id"],))
+        assert cur.fetchone()["last_error"] == "align: CUDA OOM"
+
+    repo.set_job(db, job["id"], status="queued", attempts=0, clear_error=True)
+
+    with db.cursor() as cur:
+        cur.execute("SELECT last_error FROM jobs WHERE id = %s", (job["id"],))
+        assert cur.fetchone()["last_error"] is None
+
+
+@pytest.mark.db
+def test_set_job_last_error_none_leaves_the_existing_value_untouched(db):
+    """The existing "only update what was provided" convention: passing
+    last_error=None (its default) must not clear a previously recorded
+    error — only the explicit clear_error=True may do that."""
+    repo.register_clip(db, Path("/audio/k.mp3"), "k", "abc")
+    job = repo.claim_next_job(db, quota_left=1, backoff_seconds=0)
+    repo.set_job(db, job["id"], status="queued", last_error="boom")
+
+    repo.set_job(db, job["id"], status="running")  # no last_error, no clear_error
+
+    with db.cursor() as cur:
+        cur.execute("SELECT last_error FROM jobs WHERE id = %s", (job["id"],))
+        assert cur.fetchone()["last_error"] == "boom"

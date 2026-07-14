@@ -257,6 +257,81 @@ def test_admin_retry_after_an_align_failure_succeeds_in_a_fresh_pipeline(
     assert final == {"stage": "complete", "status": "done"}
 
 
+# --- H2: a stale last_error must not survive a successful retry ----------------
+
+
+@pytest.mark.db
+def test_last_error_is_cleared_once_a_stage_that_previously_failed_succeeds(
+    db, settings, tmp_path, monkeypatch
+):
+    """A clip that fails once within its retry budget (recording last_error,
+    status back to 'queued' — no admin action involved) and then succeeds on
+    the automatic retry must not keep displaying the old failure forever: a
+    fully successful clip must show no error at all on the dashboard."""
+    monkeypatch.setattr(settings, "work_dir", tmp_path / "work")
+    monkeypatch.setattr(settings, "max_attempts", 2)
+    monkeypatch.setattr(settings, "retry_backoff_seconds", 0)
+    monkeypatch.setattr(
+        worker, "prepare_clip",
+        lambda source, work_dir, s: PrepareResult(
+            native=work_dir / "native.wav",
+            denoised=None,
+            asr_ready=work_dir / "asr.wav",
+            duration_seconds=90.0,
+            native_sample_rate=48000,
+        ),
+    )
+
+    class FlakyAligner:
+        """Fails the first call (a transient CUDA OOM), succeeds the second —
+        exercising the same-stage, same-attempts-budget retry, not admin
+        requeue_job (which already NULLs last_error itself and so wouldn't
+        prove this fix)."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def align(self, wav, text):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("CUDA OOM")
+            return WORDS
+
+    clip_id = repo.register_clip(db, Path("/a/k.mp3"), "k", "abc")
+    pipeline = worker.Pipeline(settings, db, aligner=FlakyAligner(), asr=FakeAsr())
+
+    assert pipeline.run_once() is True  # prepare -> asr
+    assert pipeline.run_once() is True  # asr -> align
+
+    assert pipeline.run_once() is True  # align attempt 1/2 fails -> requeued
+
+    with db.cursor() as cur:
+        cur.execute("SELECT stage, status, last_error FROM jobs WHERE clip_id = %s", (clip_id,))
+        mid = cur.fetchone()
+    assert mid["stage"] == "align"
+    assert mid["status"] == "queued"
+    assert "CUDA OOM" in mid["last_error"]
+
+    assert pipeline.run_once() is True  # align attempt 2/2 succeeds -> assemble
+
+    with db.cursor() as cur:
+        cur.execute("SELECT stage, last_error FROM jobs WHERE clip_id = %s", (clip_id,))
+        after_success = cur.fetchone()
+    assert after_success["stage"] == "assemble"
+    assert after_success["last_error"] is None  # the stale CUDA OOM message is gone
+
+    assert pipeline.run_once() is True  # assemble -> complete
+
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT stage, status, last_error FROM jobs WHERE clip_id = %s", (clip_id,)
+        )
+        final = cur.fetchone()
+    assert final["stage"] == "complete"
+    assert final["status"] == "done"
+    assert final["last_error"] is None
+
+
 # --- B2: attempts must reset on a successful stage transition ------------------
 
 
@@ -404,6 +479,99 @@ def test_assemble_reclaims_denoised_and_asr_wav_but_keeps_native(
         cur.execute("SELECT kind FROM audio_files WHERE clip_id = %s", (clip_id,))
         kinds = {r["kind"] for r in cur.fetchall()}
     assert kinds == {"original", "native"}  # denoised/asr_ready rows removed too
+
+
+# --- H1: words.json must be written atomically and fail loudly if corrupt ------
+
+
+def test_save_words_then_load_words_round_trips_losslessly(tmp_path):
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    words = [
+        AlignedWord(text="ਤੋ", start_s=2.1, end_s=2.3, score=0.9),
+        AlignedWord(text="ਸੋ", start_s=2.4, end_s=2.9, score=0.87654321),
+    ]
+
+    worker._save_words(work_dir, words)
+
+    assert worker._load_words(work_dir) == words
+    # No leftover temp file from the write-then-replace dance.
+    assert list(work_dir.glob("*.tmp")) == []
+
+
+def test_load_words_raises_a_named_worker_error_on_a_corrupt_file(tmp_path):
+    """A partially-written or otherwise corrupt words.json must never be
+    silently accepted, and must fail as something more diagnosable than a
+    bare JSONDecodeError — that's the exact failure shape that makes a clip
+    permanently unrecoverable through the admin's Retry button (B1's bug,
+    reopened via a different door)."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "words.json").write_text('[{"text": "ਤੋ", "start_s": 2.1,', encoding="utf-8")
+
+    with pytest.raises(worker.WorkerError, match="words.json"):
+        worker._load_words(work_dir)
+
+
+def test_save_words_leaves_the_prior_file_intact_if_the_replace_step_fails(
+    tmp_path, monkeypatch
+):
+    """If something goes wrong before the atomic replace, the previously
+    persisted words.json (from an earlier successful align) must survive
+    untouched rather than being left half-written."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    original = [AlignedWord(text="ਤੋ", start_s=1.0, end_s=1.2, score=0.5)]
+    worker._save_words(work_dir, original)
+
+    monkeypatch.setattr(
+        worker.os, "replace",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    with pytest.raises(OSError):
+        worker._save_words(work_dir, [AlignedWord(text="ਸੋ", start_s=2.0, end_s=2.2, score=0.5)])
+
+    assert worker._load_words(work_dir) == original
+    assert list(work_dir.glob("*.tmp")) == []  # the failed temp file was cleaned up
+
+
+@pytest.mark.db
+def test_a_corrupt_words_json_fails_the_assemble_stage_with_a_named_error(
+    db, settings, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "work_dir", tmp_path / "work")
+    monkeypatch.setattr(
+        worker, "prepare_clip",
+        lambda source, work_dir, s: PrepareResult(
+            native=work_dir / "native.wav",
+            denoised=None,
+            asr_ready=work_dir / "asr.wav",
+            duration_seconds=90.0,
+            native_sample_rate=48000,
+        ),
+    )
+    clip_id = repo.register_clip(db, Path("/a/k.mp3"), "k", "abc")
+    pipeline = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr())
+
+    assert pipeline.run_once() is True  # prepare -> asr
+    assert pipeline.run_once() is True  # asr -> align
+    assert pipeline.run_once() is True  # align -> assemble
+
+    work_dir = pipeline._work_dir(clip_id)
+    (work_dir / "words.json").write_text("not json at all", encoding="utf-8")
+
+    assert pipeline.run_once() is True  # assemble attempt, fails on the corrupt file
+
+    with db.cursor() as cur:
+        cur.execute("SELECT stage, status, last_error FROM jobs")
+        job = cur.fetchone()
+    # Stage stays 'assemble' (a raised exception never advances the stage) and
+    # the recorded error is the named, diagnosable WorkerError message — not
+    # just a bare "assemble: Expecting value: line 1 column 1 (char 0)".
+    assert job["stage"] == "assemble"
+    assert job["status"] == "queued"
+    assert "words.json" in job["last_error"]
+    assert "corrupt" in job["last_error"]
 
 
 @pytest.mark.db

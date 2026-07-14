@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import tempfile
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -71,9 +73,36 @@ def _words_path(work_dir: Path) -> Path:
 def _save_words(work_dir: Path, words: list[AlignedWord]) -> None:
     """Persist the aligner's output so `assemble` can run in a fresh process.
     AlignedWord is a frozen dataclass — not picklable/JSON-serialisable as-is —
-    so it is explicitly converted to plain dicts here."""
+    so it is explicitly converted to plain dicts here.
+
+    Written atomically: the payload is serialised to a temp file in the same
+    directory (guaranteeing the same filesystem) and then moved into place
+    with os.replace(), which is atomic on both POSIX and Windows. The stage
+    machine advances to 'assemble' the moment this call returns, so a plain
+    write_text() leaves a window where Postgres can durably commit
+    stage='assemble' while the OS page cache has not yet flushed a
+    *partially written* words.json to disk (a power loss or kernel panic in
+    that window). Without atomicity, the next _load_words on reboot would
+    raise a bare JSONDecodeError forever, and the admin's Retry button would
+    keep retrying straight into the same corrupt file — a permanently
+    unrecoverable clip. Atomic replace ensures a reader only ever observes
+    the fully-old file or the fully-new one, never a partial one.
+    """
     payload = [asdict(w) for w in words]
-    _words_path(work_dir).write_text(json.dumps(payload), encoding="utf-8")
+    target = _words_path(work_dir)
+    fd, tmp_name = tempfile.mkstemp(dir=work_dir, prefix=".words.", suffix=".json.tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _load_words(work_dir: Path) -> list[AlignedWord]:
@@ -83,8 +112,18 @@ def _load_words(work_dir: Path) -> list[AlignedWord]:
             f"no aligned words found at {path}; the 'align' stage must run "
             "(and succeed) before this stage can resume"
         )
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    return [AlignedWord(**w) for w in payload]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return [AlignedWord(**w) for w in payload]
+    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+        # A corrupt/partial words.json must fail loudly and diagnosably, not
+        # as a bare JSONDecodeError that gives the admin no clue what's wrong
+        # or how to fix it — this is the same failure shape B1 closed for the
+        # Retry button, and it must not be reopened here.
+        raise WorkerError(
+            f"{path} is corrupt or unreadable ({exc!r}); the 'align' stage "
+            "must be re-run to regenerate it"
+        ) from exc
 
 
 class Pipeline:
@@ -232,12 +271,19 @@ class Pipeline:
         # advanced past a stage successfully gets a full fresh set of attempts for
         # the next one, so a transient failure later (e.g. a CUDA OOM in `align`)
         # doesn't inherit exhaustion from stages that already succeeded.
+        #
+        # clear_error=True wipes any last_error left over from an earlier failed
+        # attempt at *this* stage (or a prior one). Without it, a clip that failed
+        # once and then succeeded on retry would carry a stale failure message
+        # (e.g. "align: CUDA OOM") all the way to a fully successful clip, and
+        # repo.list_clips/the dashboard would render it as a red pill forever.
         repo.set_job(
             self.conn,
             job["id"],
             stage=next_stage,
             status="done" if next_stage == "complete" else "queued",
             attempts=0,
+            clear_error=True,
         )
         return True
 

@@ -261,18 +261,31 @@ def set_job(
     last_error: str | None = None,
     sarvam_job_id: str | None = None,
     attempts: int | None = None,
+    clear_error: bool = False,
 ) -> None:
+    """Update only the columns explicitly provided — a parameter left at its
+    None default is never written. last_error is the one exception: passing
+    last_error=None also leaves it untouched (there would otherwise be no way
+    to distinguish "not provided" from "clear it"), so clearing it requires
+    the explicit clear_error=True, which emits `last_error = NULL`. This is
+    what lets a successful stage transition wipe a stale failure message
+    (e.g. a prior "align: CUDA OOM") without disturbing any other caller that
+    never passes clear_error and relies on last_error being left alone."""
     sets, params = ["updated_at = now()"], []
     for column, value in (
         ("stage", stage),
         ("status", status),
-        ("last_error", last_error),
         ("sarvam_job_id", sarvam_job_id),
         ("attempts", attempts),
     ):
         if value is not None:
             sets.append(f"{column} = %s")
             params.append(value)
+    if clear_error:
+        sets.append("last_error = NULL")
+    elif last_error is not None:
+        sets.append("last_error = %s")
+        params.append(last_error)
     params.append(job_id)
     with conn.cursor() as cur:
         cur.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id = %s", params)
