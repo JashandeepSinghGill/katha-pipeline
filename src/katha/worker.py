@@ -1,4 +1,6 @@
+import json
 import logging
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -8,13 +10,14 @@ from katha import repo
 from katha.config import Settings, get_settings
 from katha.db import connect
 from katha.ingest.watcher import scan_once
-from katha.stages.asr import SarvamAsr
+from katha.stages.asr import SarvamAsr, parse_diarized
 from katha.stages.assemble import (
     alignment_text,
     assemble_segments,
     infer_reciter_speaker_id,
 )
 from katha.stages.prepare import prepare_clip
+from katha.stages.types import AlignedWord, DiarizedEntry
 
 log = logging.getLogger("katha.worker")
 
@@ -26,17 +29,70 @@ NEXT_STAGE = {
 }
 
 
+class WorkerError(RuntimeError):
+    """Raised when a stage's durable, on-disk input is missing or unreadable —
+    e.g. align running before asr's Sarvam JSON exists on this filesystem."""
+
+
+# --- on-disk stage handoff --------------------------------------------------
+#
+# The worker is a `Type=oneshot` systemd unit: a Pipeline object lives for
+# exactly one process invocation, fired every 15 minutes. A crash, reboot, or
+# retry-after-failure can hand a clip's next stage to a *different* Pipeline
+# instance than the one that ran the previous stage. So no stage output may
+# live only in Python memory (self._whatever) — every stage re-derives its
+# input from durable artifacts on disk (or the DB), and every process is
+# treated as a fresh one:
+#
+#   asr      -> writes  work/<clip_id>/sarvam/*.json  (Sarvam's own output)
+#   align    -> reads   work/<clip_id>/sarvam/*.json,  writes work/<clip_id>/words.json
+#   assemble -> reads   work/<clip_id>/sarvam/*.json and work/<clip_id>/words.json
+
+
+def _load_entries(work_dir: Path) -> list[DiarizedEntry]:
+    """Re-derive the diarized ASR entries for a clip from the durable Sarvam JSON
+    that asr.transcribe() downloaded into work/<clip_id>/sarvam/*.json. This is
+    what lets `align` and `assemble` run in a process that never ran `asr`."""
+    sarvam_dir = work_dir / "sarvam"
+    outputs = sorted(sarvam_dir.glob("*.json"))
+    if not outputs:
+        raise WorkerError(
+            f"no Sarvam ASR output found in {sarvam_dir}; the 'asr' stage must "
+            "run (and succeed) before this stage can resume"
+        )
+    payload = json.loads(outputs[0].read_text(encoding="utf-8"))
+    return parse_diarized(payload)
+
+
+def _words_path(work_dir: Path) -> Path:
+    return work_dir / "words.json"
+
+
+def _save_words(work_dir: Path, words: list[AlignedWord]) -> None:
+    """Persist the aligner's output so `assemble` can run in a fresh process.
+    AlignedWord is a frozen dataclass — not picklable/JSON-serialisable as-is —
+    so it is explicitly converted to plain dicts here."""
+    payload = [asdict(w) for w in words]
+    _words_path(work_dir).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _load_words(work_dir: Path) -> list[AlignedWord]:
+    path = _words_path(work_dir)
+    if not path.exists():
+        raise WorkerError(
+            f"no aligned words found at {path}; the 'align' stage must run "
+            "(and succeed) before this stage can resume"
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return [AlignedWord(**w) for w in payload]
+
+
 class Pipeline:
     def __init__(self, settings: Settings, conn: psycopg.Connection, aligner=None, asr=None):
         self.settings = settings
         self.conn = conn
         self._aligner = aligner
         self._asr = asr
-        # Stage outputs that live only in memory between stages of the same clip.
-        # Everything durable goes to the DB; this is just a cache so `align` doesn't
-        # have to re-download the ASR result.
-        self._entries: dict[int, list] = {}
-        self._words: dict[int, list] = {}
 
     @property
     def aligner(self):
@@ -63,7 +119,7 @@ class Pipeline:
     # --- stages -----------------------------------------------------------
 
     def _prepare(self, job: dict) -> None:
-        clip = repo.get_clip(self.conn, job["clip_id"])
+        clip = repo.get_clip_internal(self.conn, job["clip_id"])
         result = prepare_clip(
             Path(clip["source_path"]), self._work_dir(job["clip_id"]), self.settings
         )
@@ -86,24 +142,59 @@ class Pipeline:
     def _asr_stage(self, job: dict) -> None:
         clip_id = job["clip_id"]
         work = self._work_dir(clip_id)
-        entries, sarvam_job_id = self.asr.transcribe(work / "asr.wav", work / "sarvam")
+        # transcribe() itself writes the durable JSON to work/sarvam/*.json; the
+        # returned entries are not cached here (see the module docstring above) —
+        # `_align` re-derives them from that JSON, even in a different process.
+        _entries, sarvam_job_id = self.asr.transcribe(work / "asr.wav", work / "sarvam")
         repo.set_job(self.conn, job["id"], sarvam_job_id=sarvam_job_id)
-        self._entries[clip_id] = entries
 
     def _align(self, job: dict) -> None:
         clip_id = job["clip_id"]
-        entries = self._entries[clip_id]
-        self._words[clip_id] = self.aligner.align(
-            self._work_dir(clip_id) / "asr.wav", alignment_text(entries)
-        )
+        work = self._work_dir(clip_id)
+        entries = _load_entries(work)
+        words = self.aligner.align(work / "asr.wav", alignment_text(entries))
+        _save_words(work, words)
 
     def _assemble(self, job: dict) -> None:
         clip_id = job["clip_id"]
-        segments = assemble_segments(self._entries[clip_id], self._words[clip_id])
+        work = self._work_dir(clip_id)
+        entries = _load_entries(work)
+        words = _load_words(work)
+        segments = assemble_segments(entries, words, clip_id=clip_id)
         reciter_id = infer_reciter_speaker_id(segments)
         repo.save_segments(self.conn, clip_id, segments, reciter_id)
-        self._entries.pop(clip_id, None)
-        self._words.pop(clip_id, None)
+        try:
+            self._cleanup_intermediates(clip_id)
+        except Exception:  # noqa: BLE001 — cleanup must never fail a finished clip
+            log.exception(
+                "clip %s: intermediate cleanup raised; leaving work files in place", clip_id
+            )
+
+    def _cleanup_intermediates(self, clip_id: int) -> None:
+        """Reclaim the large per-clip intermediates that are dead weight once a
+        clip has finished transcribing: the denoised WAV (~518 MB for a 90-minute
+        clip) and the 16k ASR WAV (~173 MB). native.wav is deliberately kept —
+        the /api/audio endpoint serves it to the admin review UI. Every unlink is
+        independently non-fatal: a clip that transcribed fine must not be marked
+        failed just because a file couldn't be removed (e.g. still open/locked)."""
+        for kind in ("denoised", "asr_ready"):
+            row = repo.get_audio_file(self.conn, clip_id, kind)
+            if row is None:
+                continue
+            path = Path(row["path"])
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                log.warning("clip %s: could not remove %s file %s: %s", clip_id, kind, path, exc)
+                continue
+            repo.delete_audio_file(self.conn, clip_id, kind)
+            log.info("clip %s: reclaimed %s (%s, %s bytes)", clip_id, kind, path, size)
 
     # --- driver -----------------------------------------------------------
 
@@ -117,7 +208,9 @@ class Pipeline:
         return NEXT_STAGE[job["stage"]]
 
     def run_once(self) -> bool:
-        job = repo.claim_next_job(self.conn, self._quota_left())
+        job = repo.claim_next_job(
+            self.conn, self._quota_left(), self.settings.retry_backoff_seconds
+        )
         if job is None:
             return False
 
@@ -127,11 +220,6 @@ class Pipeline:
             exhausted = job["attempts"] >= self.settings.max_attempts
             status = "failed" if exhausted else "queued"
             log.exception("clip %s failed in %s", job["clip_id"], job["stage"])
-            if exhausted:
-                # Terminal failure: this clip won't be retried without an admin
-                # requeue, so stop holding its in-memory stage output.
-                self._entries.pop(job["clip_id"], None)
-                self._words.pop(job["clip_id"], None)
             repo.set_job(
                 self.conn,
                 job["id"],
@@ -140,11 +228,16 @@ class Pipeline:
             )
             return True
 
+        # Each stage boundary is also the retry-budget boundary: a clip that just
+        # advanced past a stage successfully gets a full fresh set of attempts for
+        # the next one, so a transient failure later (e.g. a CUDA OOM in `align`)
+        # doesn't inherit exhaustion from stages that already succeeded.
         repo.set_job(
             self.conn,
             job["id"],
             stage=next_stage,
             status="done" if next_stage == "complete" else "queued",
+            attempts=0,
         )
         return True
 

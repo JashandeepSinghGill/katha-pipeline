@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,20 @@ def test_assemble_falls_back_to_asr_timings_when_word_counts_disagree():
     assert segments[0].end_ms == 3000
     assert segments[0].align_score is None
     assert segments[0].words == []
+
+
+def test_the_fallback_logs_a_warning_naming_the_clip_and_both_counts(caplog):
+    # 5 words expected (3 + 2) from ENTRIES; WORDS[:-1] supplies only 4 — this is
+    # the only signal (besides a UI badge) that word-accurate sync silently
+    # degraded to ASR-only timing for this clip.
+    with caplog.at_level(logging.WARNING, logger="katha.stages.assemble"):
+        assemble.assemble_segments(ENTRIES, WORDS[:-1], clip_id=42)
+
+    [record] = [r for r in caplog.records if r.name == "katha.stages.assemble"]
+    message = record.getMessage()
+    assert "42" in message      # names the clip
+    assert "4" in message       # actual aligner word count
+    assert "5" in message       # expected token count
 
 
 def test_infer_reciter_is_the_speaker_with_less_airtime():

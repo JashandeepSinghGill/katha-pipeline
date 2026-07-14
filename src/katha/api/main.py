@@ -13,9 +13,12 @@ from katha.config import Settings, get_settings
 from katha.db import connect
 
 app = FastAPI(title="Katha Pipeline")
+# CORS is a browser-only control: curl and other non-browser HTTP clients ignore
+# it entirely. This API has no authentication (out of scope for this slice) and
+# must not be exposed beyond localhost until it does.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[get_settings().cors_origin],
     allow_methods=["*"],
     allow_headers=["*"],
 )

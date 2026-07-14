@@ -14,8 +14,9 @@ export type Segment = {
   words: Word[]
 }
 
-// Columns that actually exist on the `clips` table — this is what
-// `GET /api/clips/{id}` returns (`SELECT * FROM clips`).
+// The explicit column allowlist `GET /api/clips/{id}` selects (repo.get_clip).
+// Deliberately narrower than the full `clips` row: source_path (a server
+// filesystem path) and sha256 are excluded so they never reach the browser.
 export interface Clip {
   id: number
   title: string

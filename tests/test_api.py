@@ -51,6 +51,18 @@ def test_get_clip_returns_segments_with_words(client, clip_id):
 
 
 @pytest.mark.db
+def test_get_clip_does_not_leak_server_filesystem_paths_or_hash(client, clip_id):
+    # source_path (a full server filesystem path) and sha256 must never reach
+    # the browser — the frontend's Clip type deliberately declares only these
+    # five columns.
+    api, _ = client
+    body = api.get(f"/api/clips/{clip_id}").json()
+    assert set(body["clip"].keys()) == {
+        "id", "title", "duration_seconds", "reciter_speaker_id", "created_at"
+    }
+
+
+@pytest.mark.db
 def test_patching_the_reciter_reassigns_every_role(client, clip_id):
     api, _ = client
     api.patch(f"/api/clips/{clip_id}", json={"reciter_speaker_id": "0"})

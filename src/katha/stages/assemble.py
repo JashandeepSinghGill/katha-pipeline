@@ -1,4 +1,8 @@
+import logging
+
 from katha.stages.types import AlignedWord, AssembledSegment, DiarizedEntry
+
+log = logging.getLogger("katha.stages.assemble")
 
 
 def _ms(seconds: float) -> int:
@@ -25,7 +29,7 @@ def _from_asr(idx: int, entry: DiarizedEntry) -> AssembledSegment:
 
 
 def assemble_segments(
-    entries: list[DiarizedEntry], words: list[AlignedWord]
+    entries: list[DiarizedEntry], words: list[AlignedWord], clip_id: int | None = None
 ) -> list[AssembledSegment]:
     entries = [e for e in entries if e.text.strip()]
     if not entries:
@@ -35,7 +39,14 @@ def assemble_segments(
     if len(words) != expected:
         # The sequential walk is only safe if every token got a word. It didn't —
         # so don't guess. Fall back to the ASR's own (looser) chunk timings and
-        # let the UI flag them.
+        # let the UI flag them. This silently downgrades the product's headline
+        # feature (word-accurate audio sync), so log it — the only other signal
+        # is a badge in the UI.
+        log.warning(
+            "clip %s: aligner word count (%d) != expected token count (%d) from "
+            "%d ASR entries; falling back to ASR-only timing for every segment",
+            clip_id, len(words), expected, len(entries),
+        )
         return [_from_asr(i, e) for i, e in enumerate(entries)]
 
     segments: list[AssembledSegment] = []

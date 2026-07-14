@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     # 6h: must exceed subprocess_timeout_seconds (4h) so a legitimately long-running
     # denoise/alignment stage is never yanked out from under a live worker.
     stale_running_minutes: int = 360
+    # A previously-failed job (attempts > 0) is only reclaimable once this many
+    # seconds have passed since its last update, so a brief blip (e.g. a 1s Sarvam
+    # network error) doesn't burn the whole retry budget in one tight worker loop.
+    retry_backoff_seconds: int = 300
+
+    # Browser-only control: curl and other non-browser HTTP clients ignore CORS
+    # entirely. The API has no authentication in this slice — it must not be
+    # exposed beyond localhost until it does.
+    cors_origin: str = "http://localhost:3000"
 
 
 def get_settings() -> Settings:

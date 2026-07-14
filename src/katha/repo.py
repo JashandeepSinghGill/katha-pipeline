@@ -67,7 +67,7 @@ def known_source_paths(conn: psycopg.Connection) -> set[str]:
     return {row["source_path"] for row in rows}
 
 
-def claim_next_job(conn: psycopg.Connection, quota_left: int) -> dict | None:
+def claim_next_job(conn: psycopg.Connection, quota_left: int, backoff_seconds: int) -> dict | None:
     """Atomically claim one queued job. SKIP LOCKED makes this safe for >1 worker.
 
     Only matches status='queued'. 'failed' is a terminal state reached once
@@ -84,6 +84,14 @@ def claim_next_job(conn: psycopg.Connection, quota_left: int) -> dict | None:
     claimed. A job that has never started (started_at IS NULL) is only
     eligible when quota_left > 0. In-flight jobs are ordered ahead of new
     ones so the pipeline drains what it started rather than fanning out.
+
+    backoff_seconds gates re-claiming of a job that has already failed at
+    least once (attempts > 0): it only becomes claimable again once
+    updated_at is older than that many seconds, so a brief outage (e.g. a
+    one-second Sarvam network blip) can't burn the whole retry budget in a
+    tight `while pipeline.run_once(): pass` loop. A job with attempts == 0 —
+    including one that just advanced a stage successfully, since the success
+    path resets attempts to 0 — is always immediately claimable.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -97,13 +105,14 @@ def claim_next_job(conn: psycopg.Connection, quota_left: int) -> dict | None:
                 SELECT id FROM jobs
                 WHERE status = 'queued' AND stage <> 'complete'
                   AND (started_at IS NOT NULL OR %s > 0)
+                  AND (attempts = 0 OR updated_at < now() - (%s * interval '1 second'))
                 ORDER BY (started_at IS NULL), created_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
             RETURNING id, clip_id, stage, attempts, sarvam_job_id
             """,
-            (quota_left,),
+            (quota_left, backoff_seconds),
         )
         row = cur.fetchone()
     conn.commit()
@@ -133,6 +142,25 @@ def reclaim_stale_jobs(conn: psycopg.Connection, older_than: datetime) -> int:
 
 
 def get_clip(conn: psycopg.Connection, clip_id: int) -> dict | None:
+    """API-facing accessor: only columns that are safe to ship to a browser
+    client. Deliberately excludes source_path (a full server filesystem path)
+    and sha256 — see get_clip_internal for the full row, which must never be
+    returned directly from an HTTP endpoint."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, title, duration_seconds, reciter_speaker_id, created_at"
+            " FROM clips WHERE id = %s",
+            (clip_id,),
+        )
+        row = cur.fetchone()
+    conn.rollback()
+    return row
+
+
+def get_clip_internal(conn: psycopg.Connection, clip_id: int) -> dict | None:
+    """Full clip row, including source_path and sha256. For server-side stage
+    code only (e.g. worker._prepare, which needs source_path to run ffmpeg) —
+    never expose this dict verbatim over the API; use get_clip for that."""
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM clips WHERE id = %s", (clip_id,))
         row = cur.fetchone()
@@ -179,6 +207,17 @@ def add_audio_file(
     return audio_id
 
 
+def delete_audio_file(conn: psycopg.Connection, clip_id: int, kind: str) -> None:
+    """Drop the row for an intermediate that the worker has unlinked from disk
+    (see Pipeline._cleanup_intermediates), so the DB never points at a missing
+    file."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM audio_files WHERE clip_id = %s AND kind = %s", (clip_id, kind)
+        )
+    conn.commit()
+
+
 def save_segments(
     conn: psycopg.Connection,
     clip_id: int,
@@ -221,6 +260,7 @@ def set_job(
     status: str | None = None,
     last_error: str | None = None,
     sarvam_job_id: str | None = None,
+    attempts: int | None = None,
 ) -> None:
     sets, params = ["updated_at = now()"], []
     for column, value in (
@@ -228,6 +268,7 @@ def set_job(
         ("status", status),
         ("last_error", last_error),
         ("sarvam_job_id", sarvam_job_id),
+        ("attempts", attempts),
     ):
         if value is not None:
             sets.append(f"{column} = %s")

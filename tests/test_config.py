@@ -16,3 +16,9 @@ def test_sarvam_defaults_are_the_verified_values():
     assert s.sarvam_language == "pa-IN"       # Sarvam uses ISO-639-1 + region
     assert s.align_language == "pan"          # aligner uses ISO-639-3
     assert s.sarvam_timeout_seconds >= 7200   # wait_until_complete default of 600s is too short
+
+
+def test_retry_backoff_and_cors_origin_defaults():
+    s = Settings(_env_file=None)
+    assert s.retry_backoff_seconds == 300
+    assert s.cors_origin == "http://localhost:3000"
