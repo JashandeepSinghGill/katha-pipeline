@@ -9,6 +9,12 @@ const clock = (ms: number) => {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
+const roleColour: Record<Segment['speaker_role'], string> = {
+  reciter: 'var(--reciter)',
+  kathakar: 'var(--kathakar)',
+  unknown: 'var(--unknown)',
+}
+
 export function SegmentList({
   segments,
   activeId,
@@ -18,15 +24,44 @@ export function SegmentList({
   segments: Segment[]
   activeId: number | null
   onPlay: (segment: Segment) => void
-  onSave: (id: number, text: string) => void
+  onSave: (id: number, text: string) => Promise<void>
 }) {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  const startEdit = (s: Segment) => {
+    setEditingId(s.id)
+    setDraft(s.text_pa)
+    setSaveError(null)
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setSaveError(null)
+  }
+
+  // Keep the editor open until the save resolves — closing it eagerly is how a
+  // failed PATCH silently loses the admin's correction. On failure the draft and
+  // the editor stay put so they can retry; on success we close it.
+  const save = async (id: number) => {
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await onSave(id, draft)
+      setEditingId(null)
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <div>
       {segments.map((s) => {
-        const colour = s.speaker_role === 'reciter' ? 'var(--reciter)' : 'var(--kathakar)'
+        const colour = roleColour[s.speaker_role]
         return (
           <div
             key={s.id}
@@ -62,13 +97,22 @@ export function SegmentList({
                   }}
                   rows={2}
                 />
-                <button onClick={() => { onSave(s.id, draft); setEditingId(null) }}>Save</button>
-                <button onClick={() => setEditingId(null)} style={{ marginLeft: 6 }}>Cancel</button>
+                <button onClick={() => save(s.id)} disabled={saving}>
+                  {saving ? 'Saving…' : 'Save'}
+                </button>
+                <button onClick={cancelEdit} disabled={saving} style={{ marginLeft: 6 }}>
+                  Cancel
+                </button>
+                {saveError && (
+                  <div style={{ color: 'var(--warn)', fontSize: 13, marginTop: 6 }}>
+                    Save failed: {saveError}
+                  </div>
+                )}
               </>
             ) : (
               <div
                 className="gurmukhi"
-                onDoubleClick={() => { setEditingId(s.id); setDraft(s.text_pa) }}
+                onDoubleClick={() => startEdit(s)}
                 title="Double-click to correct"
                 style={{ marginTop: 4 }}
               >

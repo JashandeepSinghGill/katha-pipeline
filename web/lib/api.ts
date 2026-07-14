@@ -1,4 +1,4 @@
-import type { Clip, Segment } from './types'
+import type { Clip, ClipListItem, Segment } from './types'
 
 const API = process.env.NEXT_PUBLIC_API ?? 'http://localhost:8000'
 
@@ -12,7 +12,7 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export const fetchClips = () => json<{ clips: Clip[] }>('/api/clips').then((r) => r.clips)
+export const fetchClips = () => json<{ clips: ClipListItem[] }>('/api/clips').then((r) => r.clips)
 
 export const fetchClip = (id: number) =>
   json<{ clip: Clip; segments: Segment[] }>(`/api/clips/${id}`)

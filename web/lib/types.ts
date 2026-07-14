@@ -14,11 +14,19 @@ export type Segment = {
   words: Word[]
 }
 
-export type Clip = {
+// Columns that actually exist on the `clips` table — this is what
+// `GET /api/clips/{id}` returns (`SELECT * FROM clips`).
+export interface Clip {
   id: number
   title: string
   duration_seconds: number | null
   reciter_speaker_id: string | null
+}
+
+// `GET /api/clips` additionally joins `jobs` and computes segment/loose
+// counts. Those fields only exist on the list endpoint, never on a single
+// clip fetch — keep them off the base `Clip` type.
+export interface ClipListItem extends Clip {
   stage: 'prepare' | 'asr' | 'align' | 'assemble' | 'complete'
   status: 'queued' | 'running' | 'failed' | 'done'
   attempts: number

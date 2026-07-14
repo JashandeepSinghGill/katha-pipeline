@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { fetchClips, retryClip } from '@/lib/api'
-import type { Clip } from '@/lib/types'
+import type { ClipListItem } from '@/lib/types'
 
 function duration(seconds: number | null): string {
   if (!seconds) return '—'
@@ -11,7 +11,7 @@ function duration(seconds: number | null): string {
 }
 
 export default function Dashboard() {
-  const [clips, setClips] = useState<Clip[]>([])
+  const [clips, setClips] = useState<ClipListItem[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const load = () => fetchClips().then(setClips).catch((e) => setError(String(e)))
@@ -47,7 +47,7 @@ export default function Dashboard() {
             <td>{c.loose_count > 0 ? <span className="pill failed">{c.loose_count}</span> : '—'}</td>
             <td>
               {c.status === 'failed' && (
-                <button onClick={() => retryClip(c.id).then(load)}>Retry</button>
+                <button onClick={() => retryClip(c.id).then(load).catch((e) => setError(String(e)))}>Retry</button>
               )}
             </td>
           </tr>
