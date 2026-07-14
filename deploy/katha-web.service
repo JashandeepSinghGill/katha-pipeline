@@ -1,0 +1,17 @@
+[Unit]
+Description=Katha admin UI (Next.js)
+After=network-online.target katha-api.service
+
+[Service]
+Type=simple
+User=katha
+WorkingDirectory=/opt/katha/web
+# NEXT_PUBLIC_* is baked in at BUILD time, not read at runtime. If you change
+# the API URL you must re-run `npm run build`, not just restart this unit.
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

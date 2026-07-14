@@ -1,0 +1,20 @@
+[Unit]
+Description=Katha admin API (FastAPI)
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=katha
+WorkingDirectory=/opt/katha
+EnvironmentFile=/opt/katha/.env
+# Bound to loopback ON PURPOSE. This API has NO authentication — CORS is a
+# browser-only control and curl ignores it. Anyone who can reach this port can
+# rewrite transcripts and requeue jobs. Put it behind the reverse proxy with
+# auth before changing --host.
+ExecStart=/opt/katha/.venv/bin/uvicorn katha.api.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
