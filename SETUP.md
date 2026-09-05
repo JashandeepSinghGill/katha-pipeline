@@ -12,13 +12,13 @@ This guide covers local development first (so you can see it work), then the rea
   watch folder
        │
        ▼
-  ┌─────────────────────────────────────────────────┐
-  │  worker  (systemd timer, every 15 min)          │
-  │                                                 │
-  │  prepare ──▶ asr ──▶ align ──▶ assemble         │
-  │    ffmpeg    Sarvam   MMS       merge           │
-  │  DeepFilter  (cloud)  (local)   + roles         │
-  └─────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────┐
+  │  worker  (systemd timer, every 15 min)                       │
+  │                                                              │
+  │  prepare ──▶ asr ──▶ align ──▶ assemble ──▶ correct          │
+  │    ffmpeg    Sarvam   MMS       merge        Claude (-p)     │
+  │  DeepFilter  (cloud)  (local)   + roles      + ledger        │
+  └──────────────────────────────────────────────────────────────┘
        │                              │
        ▼                              ▼
   work dir (audio)              Postgres (segments, words, jobs)
@@ -67,6 +67,16 @@ Python 3.13 is what this was built and tested on. Docker runs Postgres.
 Alignment of a 90-minute clip runs comfortably on GPU and slowly on CPU. Everything works on CPU; it's just slower. Set `KATHA_DEVICE` accordingly.
 
 > **Licence note.** The forced aligner (`ctc-forced-aligner`) and its MMS model are **CC-BY-NC 4.0 — non-commercial use only**. That's fine for a personal or parchar project. If this ever becomes commercial, you must swap it for NeMo Forced Aligner + `ai4bharat/indicconformer_stt_pa_hybrid_ctc_rnnt_large`. That change touches one file (`src/katha/stages/align.py`).
+
+### 6. Claude Code CLI, logged in
+
+The correction pass runs `claude -p` on your Max subscription. Install Claude Code, then log in **as the user that will run the worker**:
+
+```bash
+claude login
+```
+
+The login is OAuth and expires after some hours to days. When it has lapsed, the dashboard shows `correct: claude -p reported an error: Not logged in` — run `claude login` again and press **Retry**. If you would rather pay per token, set `KATHA_LLM_BACKEND=anthropic_api` and `KATHA_ANTHROPIC_API_KEY` instead.
 
 ---
 
@@ -154,7 +164,7 @@ The MMS alignment model (~1.2 GB) downloads from HuggingFace on first use and is
 .venv/bin/python -m pytest -m "not heavy"
 ```
 
-Expect **101 passed, 1 deselected**. If that's green, your database, schema and config are all correct.
+Expect **182 passed, 1 deselected**. If that's green, your database, schema and config are all correct.
 
 The deselected test is the real forced-alignment run. It downloads the model and takes **~50 minutes** on CPU. Run it once, when you have time:
 
@@ -212,6 +222,18 @@ Then open **http://localhost:3000**. Your clip should be listed. Click it once i
 5. Double-click a line to correct it. It saves, and shows `edited`.
 6. Seeking deep into the file is instant — check the browser network tab for `206` responses.
 
+### The correction pass
+
+After `assemble`, the worker runs one more stage, **`correct`**: Claude reads the transcript in windows (40 segments at a time, with 3 neighbours as context) and flags spans that are probably ASR errors — garbled names, broken verse lines, impossible dates, Latin-script leakage — each with one to five Gurmukhi candidates. Nothing is written to the transcript by the model itself.
+
+In the review view a flagged span is **highlighted** in the Gurmukhi line, with a panel underneath:
+
+- Click a **candidate** (shown in Gurmukhi with a romanized reading) to apply it. Or type your own and press **Apply**. Or **Reject**.
+- Tick **Remember as** *person / place / …* before applying to teach the **correction ledger**: the misrecognition, the correct spelling, and the eight words around it are stored. Next time the same misrecognition appears *in a similar context*, the worker applies it automatically and shows an **auto-fixed** pill with the similarity score and a **Revert** button. If the context differs, the ledger's spelling is merely ranked first among the candidates.
+- The **Ledger** page (top nav) lets you search, edit, add and retire entries, and tune each entry's context threshold. The **Settings** page holds the model id, window size, thresholds and an auto-apply on/off switch.
+
+Each window's validated output is cached in `work/<clip>/flags/<n>.json`, so a failed or interrupted pass only re-asks the windows that never completed. A clip whose correction pass fails terminally is still reviewable — the transcript exists — and **Retry** re-runs only that stage.
+
 ---
 
 ## Part 4 — Deploying to Zira
@@ -265,6 +287,17 @@ sudo /opt/venvs/deepfilternet/bin/pip install deepfilternet==0.5.6
 ```
 
 Note DeepFilterNet needs Python ≤3.12 (no 3.13 wheels). That's fine — it's a separate venv.
+
+### Log the service user into Claude
+
+The worker runs `claude -p` as `katha`, so that user needs its own login:
+
+```bash
+sudo -u katha -H claude login      # follow the browser OAuth prompt
+sudo -u katha -H claude -p --safe-mode --output-format json --tools "" "say ok"
+```
+
+The second command must print a JSON object with `"is_error":false`. The token expires periodically; re-run the login when the dashboard reports `Not logged in`. Keep `KATHA_ANTHROPIC_API_KEY` in `.env` as the fallback and flip `KATHA_LLM_BACKEND=anthropic_api` if you need the pipeline to keep going while you're away.
 
 ### Database and schema
 
@@ -419,3 +452,15 @@ This is a deliberate vertical slice — ingest through reviewable transcript. St
 - **English translation**, embeddings, and the retrieval bot
 
 > **One finding worth carrying into the verse work.** Verses are **not** confined to the reciter. In the sample transcript, the kathakar re-quotes verse lines *inside* his own commentary. So verse detection must run on **spans within segments**, not on whole reciter turns. Diarization is a useful prior — it is not a classifier.
+
+**`correct: claude -p reported an error: Not logged in · Please run /login`.**
+The worker's user has no valid Claude login. Run `claude login` as that user (on Zira: `sudo -u katha -H claude login`), then press **Retry** on the dashboard. Or switch to `KATHA_LLM_BACKEND=anthropic_api`.
+
+**`correct: claude CLI not found`.**
+Set `KATHA_CLAUDE_BIN` to the absolute path of the `claude` binary for the worker's user (systemd units have a minimal `PATH`).
+
+**`correct: … output truncated at max_tokens`** (API backend).
+Raise `KATHA_LLM_MAX_TOKENS`, or lower `correct_window_segments` on the Settings page so each call returns fewer flags.
+
+**A correction was applied that shouldn't have been.**
+Press **Revert** on the auto-fixed pill — the segment text is restored and the flag reopens. Then open the Ledger page and either raise that entry's threshold or retire it.

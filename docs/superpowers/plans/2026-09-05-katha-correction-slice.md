@@ -76,7 +76,7 @@ SETUP.md .env.example pyproject.toml     MOD
 - Produces: `appsettings.SPECS: dict[str, SettingSpec]`, `appsettings.DEFAULTS: dict[str, str]`, `appsettings.coerce(key, raw) -> int|float|bool|str`, `appsettings.validate(key, value) -> str` (raises `KeyError` on unknown key, `ValueError` on bad value).
 - Produces: tables `correction_ledger`, `flags`, `corrections`; `jobs.stage` accepts `'correct'`; `Settings.llm_backend`, `.claude_bin`, `.llm_timeout_seconds`, `.anthropic_api_key`, `.llm_max_tokens`.
 
-- [ ] **Step 1: Add dependencies**
+- [x] **Step 1: Add dependencies**
 
 In `pyproject.toml` `dependencies`, add:
 
@@ -88,7 +88,7 @@ In `pyproject.toml` `dependencies`, add:
 
 Run: `uv pip install --python .venv/Scripts/python.exe -e ".[dev]"` (already installed in this session; this records them).
 
-- [ ] **Step 2: Write the failing settings-spec test**
+- [x] **Step 2: Write the failing settings-spec test**
 
 `tests/test_appsettings.py`:
 
@@ -131,12 +131,12 @@ def test_validate_canonicalises_bools_and_rejects_unknown_keys():
         appsettings.validate("no_such_key", "1")
 ```
 
-- [ ] **Step 3: Run it to verify it fails**
+- [x] **Step 3: Run it to verify it fails**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_appsettings.py -q`
 Expected: FAIL — `ModuleNotFoundError: katha.appsettings`.
 
-- [ ] **Step 4: Implement `appsettings.py`**
+- [x] **Step 4: Implement `appsettings.py`**
 
 ```python
 """Typed specs for the admin-editable rows in the `settings` table.
@@ -220,12 +220,12 @@ def validate(key: str, value: str) -> str:
     return typed
 ```
 
-- [ ] **Step 5: Run the settings test**
+- [x] **Step 5: Run the settings test**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_appsettings.py -q`
 Expected: 4 passed. (Note `repr(float("88"))` is `'88.0'` — the round-trip test compares against `DEFAULTS`, so store `ledger_surface_threshold` default as `"88.0"` and `ledger_context_threshold` as `"0.8"`. Fix the default strings, not the validator.)
 
-- [ ] **Step 6: Write the failing schema test**
+- [x] **Step 6: Write the failing schema test**
 
 Append to `tests/test_schema.py`:
 
@@ -252,12 +252,12 @@ def test_correction_tables_exist_with_seeded_settings(db):
     assert rows == DEFAULTS
 ```
 
-- [ ] **Step 7: Run to verify it fails**
+- [x] **Step 7: Run to verify it fails**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_schema.py -q`
 Expected: FAIL — `CheckViolation` on stage `'correct'`, and `to_regclass` returns None.
 
-- [ ] **Step 8: Write the migration**
+- [x] **Step 8: Write the migration**
 
 `migrations/versions/0002_corrections.py`:
 
@@ -371,7 +371,7 @@ def downgrade() -> None:
         op.execute(f"DELETE FROM settings WHERE key = '{key}'")
 ```
 
-- [ ] **Step 9: Update `conftest.py`**
+- [x] **Step 9: Update `conftest.py`**
 
 Replace the `TABLES` tuple and the settings reset:
 
@@ -391,7 +391,7 @@ and in the `db` fixture teardown, replace the two-line settings reset with:
 
 with `from katha.appsettings import DEFAULTS` at the top.
 
-- [ ] **Step 10: Extend `config.py`**
+- [x] **Step 10: Extend `config.py`**
 
 Add after `cors_origin`:
 
@@ -408,12 +408,12 @@ Add after `cors_origin`:
     llm_max_tokens: int = 16000
 ```
 
-- [ ] **Step 11: Run the schema test and the whole fast suite**
+- [x] **Step 11: Run the schema test and the whole fast suite**
 
 Run: `.venv/Scripts/python.exe -m pytest -q -m "not heavy"`
 Expected: all green (the `_migrate` fixture applies 0002 automatically; previous 101 + 6 new).
 
-- [ ] **Step 12: Commit**
+- [x] **Step 12: Commit**
 
 ```bash
 git add pyproject.toml src/katha/appsettings.py src/katha/config.py migrations/versions/0002_corrections.py tests/conftest.py tests/test_appsettings.py tests/test_schema.py
@@ -432,7 +432,7 @@ git commit -m "feat: correction-slice schema, typed settings, and LLM config"
 - Produces: `text.normalize(s: str) -> str`, `text.romanize(s: str) -> str`.
 - Produces: `embed.Embedder` (Protocol: `name: str`, `dim: int`, `embed(text) -> list[float]`), `embed.HashingEmbedder()`, `embed.cosine(a, b) -> float`, `embed.vector_to_text(v) -> str`, `embed.vector_from_text(s) -> list[float]`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 `tests/test_text.py`:
 
@@ -506,12 +506,12 @@ def test_vector_text_round_trip():
     assert vector_to_text(v).startswith("[") and vector_to_text(v).endswith("]")
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_text.py tests/test_embed.py -q`
 Expected: FAIL — module not found.
 
-- [ ] **Step 3: Implement `text.py`**
+- [x] **Step 3: Implement `text.py`**
 
 ```python
 """Gurmukhi text helpers shared by the ledger matcher, the embedder and the API.
@@ -551,7 +551,7 @@ def romanize(s: str) -> str:
         return s
 ```
 
-- [ ] **Step 4: Implement `embed.py`**
+- [x] **Step 4: Implement `embed.py`**
 
 ```python
 """Context embeddings for the correction ledger.
@@ -620,12 +620,12 @@ def vector_from_text(s: str) -> list[float]:
     return [float(x) for x in body.split(",")] if body else []
 ```
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `.venv/Scripts/python.exe -m pytest tests/test_text.py tests/test_embed.py -q`
 Expected: 9 passed. If `test_similar_contexts_score_higher_than_unrelated_ones` thresholds miss, print the actual cosines once (ASCII only) and set the assertions to a margin that holds, keeping `similar > unrelated` by at least 0.3.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/katha/text.py src/katha/embed.py tests/test_text.py tests/test_embed.py
@@ -643,7 +643,7 @@ git commit -m "feat: gurmukhi text normalisation/romanization and hashing contex
 **Interfaces:**
 - Produces: `LLMError(RuntimeError)`; `LLMProvider` Protocol with `name: str` and `complete_json(*, system: str, user: str, schema: dict) -> dict`; `ClaudeCliProvider(settings, model, bin_path=None)`; `AnthropicApiProvider(settings, model, client=None)`; `parse_cli_result(payload) -> dict`; `make_provider(settings, model) -> LLMProvider`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 `tests/test_llm.py`:
 
@@ -865,9 +865,9 @@ def test_make_provider_selects_backend(cli_settings, stub):
         make_provider(Settings(_env_file=None, llm_backend="gpt"), model="m")
 ```
 
-- [ ] **Step 2: Run to verify failure** — `.venv/Scripts/python.exe -m pytest tests/test_llm.py -q` → `ModuleNotFoundError: katha.llm`.
+- [x] **Step 2: Run to verify failure** — `.venv/Scripts/python.exe -m pytest tests/test_llm.py -q` → `ModuleNotFoundError: katha.llm`.
 
-- [ ] **Step 3: Implement `llm.py`**
+- [x] **Step 3: Implement `llm.py`**
 
 ```python
 """The one seam every LLM call goes through (locked decision from the
@@ -1048,9 +1048,9 @@ def make_provider(settings: Settings, model: str) -> LLMProvider:
     )
 ```
 
-- [ ] **Step 4: Run tests** — `.venv/Scripts/python.exe -m pytest tests/test_llm.py -q`, expected all pass (the `sleep` case takes ~3 s on Windows: the orphaned Python child holds the pipe until it exits).
+- [x] **Step 4: Run tests** — `.venv/Scripts/python.exe -m pytest tests/test_llm.py -q`, expected all pass (the `sleep` case takes ~3 s on Windows: the orphaned Python child holds the pipe until it exits).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/katha/llm.py tests/test_llm.py
@@ -1068,7 +1068,7 @@ git commit -m "feat: LLMProvider with claude -p (Max) and Anthropic API backends
 **Interfaces:**
 - Produces: `KINDS`, `FLAG_SCHEMA`, dataclasses `SegmentText(idx, role, text)`, `Window(index, target_idx: tuple[int,...], segments: list[SegmentText])`, `ProposedFlag(segment_idx, span_text, kind, reason, candidates: tuple[str,...])`; functions `make_windows(segments, size, context) -> list[Window]`, `build_system_prompt(gazetteer: list[tuple[str, str]]) -> str`, `build_user_prompt(window) -> str`, `validate_flags(payload, window) -> tuple[list[ProposedFlag], int]`, `flags_to_json(flags) -> str`, `flags_from_json(text) -> list[ProposedFlag]`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 `tests/test_correct.py`:
 
@@ -1180,9 +1180,9 @@ def test_json_round_trip():
     assert flags_from_json(flags_to_json(flags)) == flags
 ```
 
-- [ ] **Step 2: Run to verify failure** — `.venv/Scripts/python.exe -m pytest tests/test_correct.py -q` → module missing.
+- [x] **Step 2: Run to verify failure** — `.venv/Scripts/python.exe -m pytest tests/test_correct.py -q` → module missing.
 
-- [ ] **Step 3: Implement `stages/correct.py`**
+- [x] **Step 3: Implement `stages/correct.py`**
 
 ```python
 """Pure half of the `correct` stage: how a clip is cut into LLM windows, what
@@ -1377,9 +1377,9 @@ def flags_from_json(text: str) -> list[ProposedFlag]:
     ]
 ```
 
-- [ ] **Step 4: Run tests** — `.venv/Scripts/python.exe -m pytest tests/test_correct.py -q`, expected all pass.
+- [x] **Step 4: Run tests** — `.venv/Scripts/python.exe -m pytest tests/test_correct.py -q`, expected all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/katha/stages/correct.py tests/test_correct.py
@@ -1397,7 +1397,7 @@ git commit -m "feat: correct-stage windows, prompts, schema, and flag validation
 **Interfaces:**
 - Produces: `LedgerEntry(id, canonical, surface_forms: tuple[str,...], embedding: tuple[float,...] | None, embedding_model: str | None, threshold: float)`, `Match(entry, surface_score, context_similarity: float | None, decision: 'auto'|'suggest')`, `surface_score(span, entry) -> float`, `context_text(text, span, words=8) -> str`, `match(span, context_vec, embedder_name, entries, surface_threshold) -> Match | None`, `apply_span(text, span, replacement) -> str | None`, `merge_embeddings(old, new) -> list[float]`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 `tests/test_ledger.py`:
 
@@ -1494,9 +1494,9 @@ def test_merge_embeddings_is_a_unit_mean():
     assert merge_embeddings(None, new) == new
 ```
 
-- [ ] **Step 2: Run to verify failure** — module missing.
+- [x] **Step 2: Run to verify failure** — module missing.
 
-- [ ] **Step 3: Implement `stages/ledger.py`**
+- [x] **Step 3: Implement `stages/ledger.py`**
 
 ```python
 """Pure ledger matching (spec §6). Two independent gates:
@@ -1601,9 +1601,9 @@ def merge_embeddings(old: list[float] | None, new: list[float]) -> list[float]:
     return [v / norm for v in summed] if norm else list(new)
 ```
 
-- [ ] **Step 4: Run tests** — `.venv/Scripts/python.exe -m pytest tests/test_ledger.py -q`. If `test_match_auto_when_surface_and_context_both_pass` fails on the 0.8 threshold, the two contexts differ only by the span's absence, so the cosine should be well above 0.8; investigate `context_text` before touching the threshold.
+- [x] **Step 4: Run tests** — `.venv/Scripts/python.exe -m pytest tests/test_ledger.py -q`. If `test_match_auto_when_surface_and_context_both_pass` fails on the 0.8 threshold, the two contexts differ only by the span's absence, so the cosine should be well above 0.8; investigate `context_text` before touching the threshold.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/katha/stages/ledger.py tests/test_ledger.py
@@ -1628,7 +1628,7 @@ git commit -m "feat: pure ledger matching — surface fuzz, context cosine, appl
 - Modifies: `list_clips` adds `open_flags`, `auto_applied`; `list_segments` adds `flags` and `corrections` JSON arrays.
 - Produces: `fsutil.write_text_atomic(path: Path, text: str)`.
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 `tests/test_repo_corrections.py`:
 
@@ -1802,9 +1802,9 @@ def test_write_text_atomic(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["x.json"]
 ```
 
-- [ ] **Step 2: Run to verify failure** — attribute errors on `repo`.
+- [x] **Step 2: Run to verify failure** — attribute errors on `repo`.
 
-- [ ] **Step 3: Implement `fsutil.py`**
+- [x] **Step 3: Implement `fsutil.py`**
 
 ```python
 import os
@@ -1831,7 +1831,7 @@ def write_text_atomic(path: Path, text: str) -> None:
         raise
 ```
 
-- [ ] **Step 4: Add the repo functions**
+- [x] **Step 4: Add the repo functions**
 
 Append to `src/katha/repo.py` (add `import json` and `from katha.embed import vector_from_text, vector_to_text`, `from katha.stages.ledger import LedgerEntry, merge_embeddings` at the top):
 
@@ -2253,9 +2253,9 @@ and `list_segments` to add, after the `words` aggregate:
                    ) AS corrections
 ```
 
-- [ ] **Step 5: Run** — `.venv/Scripts/python.exe -m pytest tests/test_repo_corrections.py tests/test_repo.py tests/test_api.py -q`. All green. If psycopg complains about the `text[]` parameter for `surface_forms`, pass a Python `list[str]` (psycopg 3 adapts lists to arrays natively).
+- [x] **Step 5: Run** — `.venv/Scripts/python.exe -m pytest tests/test_repo_corrections.py tests/test_repo.py tests/test_api.py -q`. All green. If psycopg complains about the `text[]` parameter for `surface_forms`, pass a Python `list[str]` (psycopg 3 adapts lists to arrays natively).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/katha/repo.py src/katha/fsutil.py tests/test_repo_corrections.py
@@ -2275,7 +2275,7 @@ git commit -m "feat: repo layer for settings, flags, corrections, and the correc
 - Consumes: `make_windows`, `build_system_prompt`, `build_user_prompt`, `validate_flags`, `flags_to_json`, `flags_from_json`, `FLAG_SCHEMA`, `SegmentText` (Task 4); `match`, `context_text`, `apply_span` (Task 5); `make_provider` (Task 3); `HashingEmbedder` (Task 2); repo functions (Task 6); `write_text_atomic`.
 - Produces: `Pipeline(settings, conn, aligner=None, asr=None, llm=None, embedder=None)`; `NEXT_STAGE["assemble"] == "correct"`, `NEXT_STAGE["correct"] == "complete"`; `Pipeline._correct(job)`, `Pipeline._apply_ledger(clip_id) -> tuple[int, int]` (auto_applied, suggested).
 
-- [ ] **Step 1: Update the existing worker tests**
+- [x] **Step 1: Update the existing worker tests**
 
 In `tests/test_worker.py`, add a `FakeLlm` and pass it in the fixture:
 
@@ -2308,7 +2308,7 @@ Update `test_run_once_walks_a_clip_through_every_stage`'s expected list to:
 
 Search the file for any other assertion that a clip ends at `("complete", "done")` after exactly four `run_once()` calls or that counts stages, and add one for `correct`. Run: `.venv/Scripts/python.exe -m pytest tests/test_worker.py -q` → the sequence test fails (still 4 stages).
 
-- [ ] **Step 2: Write the new failing tests**
+- [x] **Step 2: Write the new failing tests**
 
 `tests/test_worker_correct.py`:
 
@@ -2496,9 +2496,9 @@ def test_system_prompt_carries_the_gazetteer(db, settings, tmp_path, monkeypatch
     assert '"target": true' in llm.user
 ```
 
-- [ ] **Step 3: Run to verify failure** — `Pipeline.__init__() got an unexpected keyword argument 'llm'`.
+- [x] **Step 3: Run to verify failure** — `Pipeline.__init__() got an unexpected keyword argument 'llm'`.
 
-- [ ] **Step 4: Implement in `worker.py`**
+- [x] **Step 4: Implement in `worker.py`**
 
 Imports to add:
 
@@ -2634,9 +2634,9 @@ Change the constructor and add the stage:
 
 Register the stage in `run_stage`'s dict: `"correct": self._correct,`.
 
-- [ ] **Step 5: Run** — `.venv/Scripts/python.exe -m pytest tests/test_worker.py tests/test_worker_correct.py -q`. All green. If the cached-window retry test counts 6 calls, the failed window's file was written before the exception — it must not be (the write happens only after validation succeeds).
+- [x] **Step 5: Run** — `.venv/Scripts/python.exe -m pytest tests/test_worker.py tests/test_worker_correct.py -q`. All green. If the cached-window retry test counts 6 calls, the failed window's file was written before the exception — it must not be (the write happens only after validation succeeds).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/katha/worker.py tests/test_worker.py tests/test_worker_correct.py
@@ -2656,7 +2656,7 @@ git commit -m "feat: correct stage — windowed LLM flagging with on-disk cache 
 - Produces (`review.py`): `class ReviewError(Exception)` with `.status: int`; `accept_flag(conn, embedder, flag_id, text, remember: dict | None) -> dict` (returns `{"segment_id", "text_pa", "correction_id", "ledger_id"}`); `reject_flag(conn, flag_id) -> None`; `revert_correction(conn, correction_id) -> dict` (returns `{"segment_id", "text_pa"}`).
 - Produces (API): `POST /api/flags/{id}/resolve`, `POST /api/corrections/{id}/revert`, `GET /api/ledger?q=&include_retired=`, `POST /api/ledger`, `PATCH /api/ledger/{id}`, `GET /api/settings`, `PUT /api/settings`.
 
-- [ ] **Step 1: Failing service tests**
+- [x] **Step 1: Failing service tests**
 
 `tests/test_review.py`:
 
@@ -2757,7 +2757,7 @@ def test_revert_refuses_when_the_corrected_text_is_gone(db, flag):
     assert exc.value.status == 404
 ```
 
-- [ ] **Step 2: Implement `review.py`**
+- [x] **Step 2: Implement `review.py`**
 
 ```python
 """Admin actions on flags and corrections. Thin, transactional-per-call, and
@@ -2845,9 +2845,9 @@ def revert_correction(conn: psycopg.Connection, correction_id: int) -> dict:
     return {"segment_id": seg["id"], "text_pa": restored}
 ```
 
-- [ ] **Step 3: Run** — `.venv/Scripts/python.exe -m pytest tests/test_review.py -q` → green.
+- [x] **Step 3: Run** — `.venv/Scripts/python.exe -m pytest tests/test_review.py -q` → green.
 
-- [ ] **Step 4: Failing API tests**
+- [x] **Step 4: Failing API tests**
 
 `tests/test_api_corrections.py`:
 
@@ -2957,7 +2957,7 @@ def test_settings_endpoints_validate(api):
     assert api.get("/api/settings").json()["values"]["files_per_day"] == "5"  # nothing partial
 ```
 
-- [ ] **Step 5: Add the endpoints to `api/main.py`**
+- [x] **Step 5: Add the endpoints to `api/main.py`**
 
 Imports to add: `from typing import Literal`, `from katha import appsettings, review`, `from katha.embed import HashingEmbedder`, `from katha.text import romanize`.
 
@@ -3093,9 +3093,9 @@ def put_settings(body: SettingsBody, conn=Depends(get_conn)):
     return {"ok": True, "values": repo.get_all_settings(conn)}
 ```
 
-- [ ] **Step 6: Run** — `.venv/Scripts/python.exe -m pytest tests/test_api_corrections.py tests/test_api.py -q` → green. Then the whole fast suite.
+- [x] **Step 6: Run** — `.venv/Scripts/python.exe -m pytest tests/test_api_corrections.py tests/test_api.py -q` → green. Then the whole fast suite.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/katha/review.py src/katha/api/main.py tests/test_review.py tests/test_api_corrections.py
@@ -3113,7 +3113,7 @@ git commit -m "feat: flag resolution, correction revert, ledger and settings end
 **Interfaces:**
 - Consumes: the Task 8 endpoints and the `flags` / `corrections` arrays on each segment.
 
-- [ ] **Step 1: Types and API client**
+- [x] **Step 1: Types and API client**
 
 Append to `web/lib/types.ts`:
 
@@ -3215,7 +3215,7 @@ export const putSettings = (values: Record<string, string>) =>
 
 Also make `json()` surface the API's `detail` message: after `if (!res.ok)`, read `const detail = await res.text().catch(() => '')` and throw `new Error(\`${init?.method ?? 'GET'} ${path} → ${res.status} ${detail}\`)`.
 
-- [ ] **Step 2: Highlight helper** — `web/lib/highlight.tsx`:
+- [x] **Step 2: Highlight helper** — `web/lib/highlight.tsx`:
 
 ```tsx
 import type { ReactNode } from 'react'
@@ -3244,7 +3244,7 @@ export function highlight(text: string, spans: string[]): ReactNode[] {
 }
 ```
 
-- [ ] **Step 3: `FlagPanel.tsx`**
+- [x] **Step 3: `FlagPanel.tsx`**
 
 ```tsx
 'use client'
@@ -3316,7 +3316,7 @@ export function FlagPanel({ flag, onResolve }: { flag: Flag; onResolve: (body: R
 }
 ```
 
-- [ ] **Step 4: Wire flags into `SegmentList.tsx`**
+- [x] **Step 4: Wire flags into `SegmentList.tsx`**
 
 Add props `onResolve: (flagId: number, body: ResolveBody) => Promise<void>` and `onRevert: (correctionId: number) => Promise<void>`. Import `highlight`, `FlagPanel`, `ResolveBody`. Replace the read-only Gurmukhi `<div>`'s child `{s.text_pa}` with `{highlight(s.text_pa, s.flags.filter((f) => f.status === 'open').map((f) => f.span_text))}`. After the romanized line, add:
 
@@ -3345,7 +3345,7 @@ Add props `onResolve: (flagId: number, body: ResolveBody) => Promise<void>` and 
 
 In `web/app/clips/[id]/page.tsx`, pass `onResolve={(id, body) => resolveFlag(id, body).then(() => load())}` and `onRevert={(id) => revertCorrection(id).then(() => load())}` (import both from `@/lib/api`). Note `load()` returns a promise that resolves after state updates, so a failed reload surfaces as the page error, not a panel error.
 
-- [ ] **Step 5: Dashboard and nav**
+- [x] **Step 5: Dashboard and nav**
 
 `web/app/page.tsx`: link the title when `c.segment_count > 0` (not only when `done`); add columns `Flags` (`c.open_flags > 0 ? <span className="pill">{c.open_flags}</span> : '—'`) and `Auto-fixed` (`c.auto_applied || '—'`).
 
@@ -3375,7 +3375,7 @@ mark { background: rgba(212,162,76,.25); color: inherit; border-bottom: 2px soli
 input, select { font: inherit; }
 ```
 
-- [ ] **Step 6: `/ledger` page** — `web/app/ledger/page.tsx`:
+- [x] **Step 6: `/ledger` page** — `web/app/ledger/page.tsx`:
 
 ```tsx
 'use client'
@@ -3481,7 +3481,7 @@ export default function Ledger() {
 }
 ```
 
-- [ ] **Step 7: `/settings` page** — `web/app/settings/page.tsx`:
+- [x] **Step 7: `/settings` page** — `web/app/settings/page.tsx`:
 
 ```tsx
 'use client'
@@ -3560,11 +3560,11 @@ export default function SettingsPage() {
 }
 ```
 
-- [ ] **Step 8: Build**
+- [x] **Step 8: Build**
 
 Run: `cd web && npm run build`. Expected: 0 TypeScript errors, the three routes listed (`/`, `/clips/[id]`, `/ledger`, `/settings`). Fix type errors in place (do not loosen `tsconfig`).
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add web/
@@ -3578,7 +3578,7 @@ git commit -m "feat: flag review panel, auto-fix revert, ledger browser, and set
 **Files:**
 - Modify: `SETUP.md`, `.env.example`
 
-- [ ] **Step 1: `.env.example`** — add before the API section:
+- [x] **Step 1: `.env.example`** — add before the API section:
 
 ```bash
 # ─── LLM (correction pass) ───────────────────────────────────────────────────
@@ -3596,9 +3596,9 @@ KATHA_ANTHROPIC_API_KEY=
 # on the Settings page, not here.
 ```
 
-- [ ] **Step 2: `SETUP.md`** — update the stage diagram to include `correct` (Claude, local CLI); in Part 1 add "6. Claude Code CLI, logged in" with `claude login`; in Part 3 add a section **The correction pass** describing: what a flag is, the review panel, Remember-as-ledger, auto-fix + Revert, the `/ledger` and `/settings` pages, and that the per-window cache lives in `work/<clip>/flags/`; in Part 4 add `sudo -u katha claude login` and the API fallback; in Part 6 add troubleshooting entries: "correct: claude -p reported an error: Not logged in" → re-login as the service user; "claude CLI not found" → set `KATHA_CLAUDE_BIN`; "output truncated at max_tokens" → raise `KATHA_LLM_MAX_TOKENS` or lower `correct_window_segments`. Update the expected test count in Part 2.
+- [x] **Step 2: `SETUP.md`** — update the stage diagram to include `correct` (Claude, local CLI); in Part 1 add "6. Claude Code CLI, logged in" with `claude login`; in Part 3 add a section **The correction pass** describing: what a flag is, the review panel, Remember-as-ledger, auto-fix + Revert, the `/ledger` and `/settings` pages, and that the per-window cache lives in `work/<clip>/flags/`; in Part 4 add `sudo -u katha claude login` and the API fallback; in Part 6 add troubleshooting entries: "correct: claude -p reported an error: Not logged in" → re-login as the service user; "claude CLI not found" → set `KATHA_CLAUDE_BIN`; "output truncated at max_tokens" → raise `KATHA_LLM_MAX_TOKENS` or lower `correct_window_segments`. Update the expected test count in Part 2.
 
-- [ ] **Step 3: Full verification**
+- [x] **Step 3: Full verification**
 
 ```bash
 .venv/Scripts/python.exe -m pytest -q -m "not heavy"
