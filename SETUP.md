@@ -269,7 +269,7 @@ The pipeline lives in its own **unprivileged LXC, CT 213 `katha`** on the Proxmo
 | Postgres | `docker compose` (`katha-db`, pgvector 0.8.5 / PG 17), databases `katha` + `katha_test`, schema at migration 0002; the full fast suite (188 tests) passes inside the container |
 | GPU | NVIDIA 595.80 userspace installed with `--no-kernel-modules`: `nvidia-smi` works and `torch.cuda.is_available()` is true; the heavy aligner test passed on the T550 in 41 s |
 | Services | `katha-api` (**bound to 0.0.0.0:8000 via a drop-in** `/etc/systemd/system/katha-api.service.d/lan.conf` — the repo unit keeps 127.0.0.1; the API still has no auth, so this is LAN-only exposure), `katha-web` on :3000 built with `NEXT_PUBLIC_API=http://10.0.0.14:8000`, `katha-worker.timer` every 15 min |
-| Claude | Claude Code 2.1.261 at `/home/katha/.local/bin/claude`; **login still needs a human** (see below) |
+| Claude | Claude Code 2.1.261 at `/home/katha/.local/bin/claude`, logged in as the Max account on 2026-09-05 (OAuth expires periodically: when the dashboard shows `Not logged in`, run `pct exec 213 -- sudo -u katha -H claude login` and paste the browser code) |
 
 The archive is mounted read-only on purpose: the watcher only *reads* the watch folder (it never moves files), so point `KATHA_WATCH_DIR` at `/srv/media/katha/archive/SGND JI` and the daily throttle will register three files a day. Until then, process one clip at a time by symlinking it into the incoming folder:
 
