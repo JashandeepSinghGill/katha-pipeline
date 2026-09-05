@@ -263,8 +263,23 @@ The pipeline lives in its own **unprivileged LXC, CT 213 `katha`** on the Proxmo
 | Denoiser | `/opt/deep-filter/deep-filter` (Rust, streaming — the one the pipeline uses); the python CLI is also installed at `/opt/venvs/deepfilternet` for experiments |
 | GPU | the NVIDIA T550's device nodes are passed through (frigate's pattern, with the current `504` major for `nvidia-uvm`), but **no NVIDIA userspace is installed inside the CT yet** — `KATHA_DEVICE=cuda` needs the driver's user libs (`NVIDIA-Linux-x86_64-595.80.run --no-kernel-module`, matching the host's 595.80) |
 | Access | `pct exec 213 -- …` from the host, or `pct enter 213`. Root **password** SSH is disabled by the template (`PermitRootLogin prohibit-password`); add your SSH key or flip that line in `/etc/ssh/sshd_config` yourself |
+| Service user | `katha`, uid 1000 (matches the mounts), home `/home/katha`, in the `docker` group |
+| Code | `/opt/katha` cloned from a `git bundle` of `main` (no remote exists); `.venv` built with uv on Python 3.12 — torch 2.14 **CUDA 13** build, `ctc-forced-aligner` 0.3.0; the MMS model is cached at `/home/katha/.cache/huggingface` |
+| Config | `/opt/katha/.env` (mode 600; holds the generated Postgres password). `KATHA_WATCH_DIR=/srv/media/katha/incoming` — **empty on purpose**, so nothing is processed until you drop or symlink a file there. `KATHA_SARVAM_API_KEY` is still empty |
+| Postgres | `docker compose` (`katha-db`, pgvector 0.8.5 / PG 17), databases `katha` + `katha_test`, schema at migration 0002; the full fast suite (188 tests) passes inside the container |
+| GPU | NVIDIA 595.80 userspace installed with `--no-kernel-modules`: `nvidia-smi` works and `torch.cuda.is_available()` is true; the heavy aligner test passed on the T550 in 41 s |
+| Services | `katha-api` (**bound to 0.0.0.0:8000 via a drop-in** `/etc/systemd/system/katha-api.service.d/lan.conf` — the repo unit keeps 127.0.0.1; the API still has no auth, so this is LAN-only exposure), `katha-web` on :3000 built with `NEXT_PUBLIC_API=http://10.0.0.14:8000`, `katha-worker.timer` every 15 min |
+| Claude | Claude Code 2.1.261 at `/home/katha/.local/bin/claude`; **login still needs a human** (see below) |
 
-The archive is mounted read-only on purpose: the watcher only *reads* the watch folder (it never moves files), so point `KATHA_WATCH_DIR` at `/srv/media/katha/archive/SGND JI` and the daily throttle will register three files a day.
+The archive is mounted read-only on purpose: the watcher only *reads* the watch folder (it never moves files), so point `KATHA_WATCH_DIR` at `/srv/media/katha/archive/SGND JI` and the daily throttle will register three files a day. Until then, process one clip at a time by symlinking it into the incoming folder:
+
+```bash
+pct exec 213 -- sudo -u katha ln -s "/srv/media/katha/archive/SGND JI/PART 269.mp3" /srv/media/katha/incoming/
+pct exec 213 -- systemctl start katha-worker.service     # or wait for the 15-minute timer
+pct exec 213 -- journalctl -u katha-worker -n 50
+```
+
+Open **http://10.0.0.14:3000** from any machine on the LAN.
 
 ### Set up
 
