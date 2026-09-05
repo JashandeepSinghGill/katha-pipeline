@@ -11,13 +11,27 @@ import psycopg
 from katha import repo
 from katha.config import Settings, get_settings
 from katha.db import connect
+from katha.embed import HashingEmbedder
+from katha.fsutil import write_text_atomic
 from katha.ingest.watcher import scan_once
+from katha.llm import make_provider
 from katha.stages.asr import SarvamAsr, parse_diarized
 from katha.stages.assemble import (
     alignment_text,
     assemble_segments,
     infer_reciter_speaker_id,
 )
+from katha.stages.correct import (
+    FLAG_SCHEMA,
+    SegmentText,
+    build_system_prompt,
+    build_user_prompt,
+    flags_from_json,
+    flags_to_json,
+    make_windows,
+    validate_flags,
+)
+from katha.stages.ledger import apply_span, context_text, match
 from katha.stages.prepare import prepare_clip
 from katha.stages.types import AlignedWord, DiarizedEntry
 
@@ -27,7 +41,8 @@ NEXT_STAGE = {
     "prepare": "asr",
     "asr": "align",
     "align": "assemble",
-    "assemble": "complete",
+    "assemble": "correct",
+    "correct": "complete",
 }
 
 
@@ -49,6 +64,10 @@ class WorkerError(RuntimeError):
 #   asr      -> writes  work/<clip_id>/sarvam/*.json  (Sarvam's own output)
 #   align    -> reads   work/<clip_id>/sarvam/*.json,  writes work/<clip_id>/words.json
 #   assemble -> reads   work/<clip_id>/sarvam/*.json and work/<clip_id>/words.json
+#   correct  -> reads   segments (DB); writes work/<clip_id>/flags/<n>.json per LLM
+#               window (validated output, atomic), then flags (DB), then runs the
+#               ledger pass. A retry after a failed window reuses every window
+#               file that already exists, so only the failed window is re-asked.
 
 
 def _load_entries(work_dir: Path) -> list[DiarizedEntry]:
@@ -127,11 +146,16 @@ def _load_words(work_dir: Path) -> list[AlignedWord]:
 
 
 class Pipeline:
-    def __init__(self, settings: Settings, conn: psycopg.Connection, aligner=None, asr=None):
+    def __init__(
+        self, settings: Settings, conn: psycopg.Connection,
+        aligner=None, asr=None, llm=None, embedder=None,
+    ):
         self.settings = settings
         self.conn = conn
         self._aligner = aligner
         self._asr = asr
+        self._llm = llm
+        self.embedder = embedder or HashingEmbedder()
 
     @property
     def aligner(self):
@@ -146,6 +170,12 @@ class Pipeline:
         if self._asr is None:
             self._asr = SarvamAsr(self.settings)
         return self._asr
+
+    def _provider(self):
+        if self._llm is not None:
+            return self._llm
+        model = repo.get_setting(self.conn, "llm_model", "claude-sonnet-5")
+        return make_provider(self.settings, model)
 
     def _work_dir(self, clip_id: int) -> Path:
         return self.settings.work_dir / str(clip_id)
@@ -235,6 +265,87 @@ class Pipeline:
             repo.delete_audio_file(self.conn, clip_id, kind)
             log.info("clip %s: reclaimed %s (%s, %s bytes)", clip_id, kind, path, size)
 
+    def _correct(self, job: dict) -> None:
+        clip_id = job["clip_id"]
+        rows = repo.list_segment_texts(self.conn, clip_id)
+        if not rows:
+            log.warning("clip %s: no segments to correct", clip_id)
+            return
+        segments = [
+            SegmentText(idx=r["idx"], role=r["speaker_role"] or "unknown", text=r["text_pa"])
+            for r in rows
+        ]
+        id_by_idx = {r["idx"]: r["id"] for r in rows}
+        size = repo.get_setting_int(self.conn, "correct_window_segments", 40)
+        context = repo.get_setting_int(self.conn, "correct_context_segments", 3)
+        windows = make_windows(segments, size, context)
+        system = build_system_prompt(repo.top_gazetteer(self.conn))
+        cache_dir = self._work_dir(clip_id) / "flags"
+        provider = None
+
+        proposed = []
+        for w in windows:
+            path = cache_dir / f"{w.index}.json"
+            if path.exists():
+                flags = flags_from_json(path.read_text(encoding="utf-8"))
+            else:
+                if provider is None:
+                    provider = self._provider()
+                payload = provider.complete_json(
+                    system=system, user=build_user_prompt(w), schema=FLAG_SCHEMA
+                )
+                flags, dropped = validate_flags(payload, w)
+                log.info(
+                    "clip %s window %d/%d: %d flag(s) kept, %d dropped",
+                    clip_id, w.index + 1, len(windows), len(flags), dropped,
+                )
+                # Written only AFTER validation succeeds: a window that raised
+                # must be re-asked on retry, never replayed from a partial file.
+                write_text_atomic(path, flags_to_json(flags))
+            proposed.extend(flags)
+
+        n = repo.save_flags(
+            self.conn, clip_id,
+            [(id_by_idx[f.segment_idx], f.span_text, f.kind, f.reason, list(f.candidates))
+             for f in proposed],
+        )
+        log.info("clip %s: %d flag(s) persisted from %d window(s)", clip_id, n, len(windows))
+        auto, suggested = self._apply_ledger(clip_id)
+        log.info("clip %s: ledger auto-applied %d, suggested %d", clip_id, auto, suggested)
+
+    def _apply_ledger(self, clip_id: int) -> tuple[int, int]:
+        """Spec §6 auto-apply. Both gates (surface fuzz + context cosine) must
+        pass for an automatic rewrite; a surface-only hit becomes the top-ranked
+        suggestion instead. Every rewrite is logged in `corrections` and can be
+        reverted from the review UI."""
+        entries = repo.ledger_entries(self.conn)
+        if not entries:
+            return 0, 0
+        surface_threshold = repo.get_setting_float(self.conn, "ledger_surface_threshold", 88.0)
+        auto_enabled = repo.get_setting_bool(self.conn, "auto_apply_enabled", True)
+        auto = suggested = 0
+        for flag in repo.list_open_flags(self.conn, clip_id):
+            ctx = context_text(flag["text_pa"], flag["span_text"])
+            vec = self.embedder.embed(ctx) if ctx else None
+            m = match(flag["span_text"], vec, self.embedder.name, entries, surface_threshold)
+            if m is None:
+                continue
+            canonical = m.entry.canonical
+            if m.decision == "auto" and auto_enabled:
+                new_text = apply_span(flag["text_pa"], flag["span_text"], canonical)
+                if new_text is not None:
+                    repo.apply_auto_correction(
+                        self.conn, flag_id=flag["id"], segment_id=flag["segment_id"],
+                        ledger_id=m.entry.id, new_text=new_text, before=flag["span_text"],
+                        after=canonical, similarity=m.context_similarity or 0.0,
+                    )
+                    auto += 1
+                    continue
+            candidates = [canonical] + [c for c in flag["candidates"] if c != canonical]
+            repo.set_flag_suggestion(self.conn, flag["id"], m.entry.id, candidates[:6])
+            suggested += 1
+        return auto, suggested
+
     # --- driver -----------------------------------------------------------
 
     def run_stage(self, job: dict) -> str:
@@ -243,6 +354,7 @@ class Pipeline:
             "asr": self._asr_stage,
             "align": self._align,
             "assemble": self._assemble,
+            "correct": self._correct,
         }[job["stage"]](job)
         return NEXT_STAGE[job["stage"]]
 

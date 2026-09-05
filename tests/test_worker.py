@@ -63,6 +63,19 @@ class FakeAligner:
         return WORDS
 
 
+class FakeLlm:
+    """Stands in for katha.llm.LLMProvider. Returns the same flags every call."""
+    name = "fake"
+
+    def __init__(self, flags=None):
+        self.flags = flags or []
+        self.calls = 0
+
+    def complete_json(self, *, system, user, schema):
+        self.calls += 1
+        return {"flags": self.flags}
+
+
 @pytest.fixture
 def pipeline(db, settings, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "work_dir", tmp_path / "work")
@@ -76,7 +89,7 @@ def pipeline(db, settings, tmp_path, monkeypatch):
             native_sample_rate=48000,
         ),
     )
-    return worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr())
+    return worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr(), llm=FakeLlm())
 
 
 @pytest.mark.db
@@ -93,6 +106,7 @@ def test_run_once_walks_a_clip_through_every_stage(db, pipeline):
         ("asr", "queued"),
         ("align", "queued"),
         ("assemble", "queued"),
+        ("correct", "queued"),
         ("complete", "done"),
     ]
 
@@ -177,7 +191,7 @@ def test_a_brand_new_pipeline_can_resume_align_and_assemble_after_a_different_pr
     # Process 1: runs prepare and asr, then "exits" (crash/reboot/end of the
     # 15-minute systemd timer window). Nothing about this Pipeline object
     # survives into process 2 below except what it wrote to Postgres and disk.
-    process_one = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr())
+    process_one = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr(), llm=FakeLlm())
     assert process_one.run_once() is True  # prepare -> asr
     assert process_one.run_once() is True  # asr -> align
 
@@ -191,9 +205,10 @@ def test_a_brand_new_pipeline_can_resume_align_and_assemble_after_a_different_pr
     # code this KeyErrors inside _align (self._entries[clip_id] was never
     # populated in *this* object), which the generic except in run_once turns
     # into a requeue-then-eventually-failed clip instead of a successful align.
-    process_two = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr())
+    process_two = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr(), llm=FakeLlm())
     assert process_two.run_once() is True  # align
-    assert process_two.run_once() is True  # assemble -> complete
+    assert process_two.run_once() is True  # assemble -> correct
+    assert process_two.run_once() is True  # correct -> complete
 
     with db.cursor() as cur:
         cur.execute("SELECT stage, status FROM jobs WHERE clip_id = %s", (clip_id,))
@@ -233,7 +248,7 @@ def test_admin_retry_after_an_align_failure_succeeds_in_a_fresh_pipeline(
         def align(self, wav, text):
             raise RuntimeError("CUDA OOM")
 
-    doomed = worker.Pipeline(settings, db, aligner=BoomAligner(), asr=FakeAsr())
+    doomed = worker.Pipeline(settings, db, aligner=BoomAligner(), asr=FakeAsr(), llm=FakeLlm())
     assert doomed.run_once() is True  # prepare -> asr
     assert doomed.run_once() is True  # asr -> align
     assert doomed.run_once() is True  # align fails, max_attempts=1 -> terminal failed
@@ -247,9 +262,10 @@ def test_admin_retry_after_an_align_failure_succeeds_in_a_fresh_pipeline(
 
     # The admin clicks Retry, and whatever worker process picks this up next is
     # a fresh one — never the one that ran asr.
-    rescuer = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr())
+    rescuer = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr(), llm=FakeLlm())
     assert rescuer.run_once() is True  # align, this time succeeding
-    assert rescuer.run_once() is True  # assemble -> complete
+    assert rescuer.run_once() is True  # assemble -> correct
+    assert rescuer.run_once() is True  # correct -> complete
 
     with db.cursor() as cur:
         cur.execute("SELECT stage, status FROM jobs WHERE clip_id = %s", (clip_id,))
@@ -298,7 +314,7 @@ def test_last_error_is_cleared_once_a_stage_that_previously_failed_succeeds(
             return WORDS
 
     clip_id = repo.register_clip(db, Path("/a/k.mp3"), "k", "abc")
-    pipeline = worker.Pipeline(settings, db, aligner=FlakyAligner(), asr=FakeAsr())
+    pipeline = worker.Pipeline(settings, db, aligner=FlakyAligner(), asr=FakeAsr(), llm=FakeLlm())
 
     assert pipeline.run_once() is True  # prepare -> asr
     assert pipeline.run_once() is True  # asr -> align
@@ -320,7 +336,8 @@ def test_last_error_is_cleared_once_a_stage_that_previously_failed_succeeds(
     assert after_success["stage"] == "assemble"
     assert after_success["last_error"] is None  # the stale CUDA OOM message is gone
 
-    assert pipeline.run_once() is True  # assemble -> complete
+    assert pipeline.run_once() is True  # assemble -> correct
+    assert pipeline.run_once() is True  # correct -> complete
 
     with db.cursor() as cur:
         cur.execute(
@@ -460,7 +477,7 @@ def test_assemble_reclaims_denoised_and_asr_wav_but_keeps_native(
         ),
     )
     clip_id = repo.register_clip(db, Path("/a/k.mp3"), "k", "abc")
-    pipeline = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr())
+    pipeline = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr(), llm=FakeLlm())
     work_dir = pipeline._work_dir(clip_id)
     work_dir.mkdir(parents=True)
     for name in ("native.wav", "native_DeepFilterNet3.wav", "asr.wav"):
@@ -551,7 +568,7 @@ def test_a_corrupt_words_json_fails_the_assemble_stage_with_a_named_error(
         ),
     )
     clip_id = repo.register_clip(db, Path("/a/k.mp3"), "k", "abc")
-    pipeline = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr())
+    pipeline = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr(), llm=FakeLlm())
 
     assert pipeline.run_once() is True  # prepare -> asr
     assert pipeline.run_once() is True  # asr -> align
@@ -595,7 +612,7 @@ def test_a_cleanup_failure_does_not_fail_an_otherwise_successful_clip(
         ),
     )
     clip_id = repo.register_clip(db, Path("/a/k.mp3"), "k", "abc")
-    pipeline = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr())
+    pipeline = worker.Pipeline(settings, db, aligner=FakeAligner(), asr=FakeAsr(), llm=FakeLlm())
     work_dir = pipeline._work_dir(clip_id)
     (work_dir / "denoised_dir").mkdir(parents=True)
 
