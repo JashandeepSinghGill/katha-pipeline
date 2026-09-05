@@ -9,6 +9,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body>
         <header>
           <a href="/">Katha Pipeline</a>
+          <nav>
+            <a href="/ledger">Ledger</a>
+            <a href="/settings">Settings</a>
+          </nav>
         </header>
         <main>{children}</main>
       </body>

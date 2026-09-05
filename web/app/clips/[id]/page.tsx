@@ -3,7 +3,14 @@
 import { use, useCallback, useEffect, useRef, useState } from 'react'
 import { SegmentList } from '@/components/SegmentList'
 import { SpeakerRoles } from '@/components/SpeakerRoles'
-import { audioUrl, fetchClip, patchReciter, patchSegment } from '@/lib/api'
+import {
+  audioUrl,
+  fetchClip,
+  patchReciter,
+  patchSegment,
+  resolveFlag,
+  revertCorrection,
+} from '@/lib/api'
 import type { Clip, Segment } from '@/lib/types'
 
 export default function Review({ params }: { params: Promise<{ id: string }> }) {
@@ -65,9 +72,18 @@ export default function Review({ params }: { params: Promise<{ id: string }> }) 
   if (error) return <p className="pill failed">{error}</p>
   if (!clip) return <p>Loading…</p>
 
+  const openFlags = segments.reduce((n, s) => n + s.flags.filter((f) => f.status === 'open').length, 0)
+
   return (
     <>
-      <h2>{clip.title}</h2>
+      <h2>
+        {clip.title}
+        {openFlags > 0 && (
+          <span className="pill flagged" style={{ marginLeft: 12, verticalAlign: 'middle' }}>
+            {openFlags} open flag{openFlags > 1 ? 's' : ''}
+          </span>
+        )}
+      </h2>
 
       <audio
         ref={audio}
@@ -90,6 +106,8 @@ export default function Review({ params }: { params: Promise<{ id: string }> }) 
         activeId={activeId}
         onPlay={play}
         onSave={(id, text) => patchSegment(id, text).then(load)}
+        onResolve={(id, body) => resolveFlag(id, body).then(load)}
+        onRevert={(id) => revertCorrection(id).then(load)}
       />
     </>
   )

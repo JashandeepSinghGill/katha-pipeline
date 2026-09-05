@@ -29,14 +29,16 @@ export default function Dashboard() {
       <thead>
         <tr>
           <th>Clip</th><th>Length</th><th>Stage</th>
-          <th>Segments</th><th>Loose timings</th><th></th>
+          <th>Segments</th><th>Loose timings</th><th>Flags</th><th>Auto-fixed</th><th></th>
         </tr>
       </thead>
       <tbody>
         {clips.map((c) => (
           <tr key={c.id}>
             <td>
-              {c.status === 'done'
+              {/* Reviewable as soon as a transcript exists — even if the
+                  correction pass later failed, the admin can still work. */}
+              {c.segment_count > 0
                 ? <a href={`/clips/${c.id}`}>{c.title}</a>
                 : c.title}
               {c.last_error && <div className="pill failed">{c.last_error}</div>}
@@ -45,6 +47,8 @@ export default function Dashboard() {
             <td><span className={`pill ${c.status}`}>{c.stage} · {c.status}</span></td>
             <td>{c.segment_count}</td>
             <td>{c.loose_count > 0 ? <span className="pill failed">{c.loose_count}</span> : '—'}</td>
+            <td>{c.open_flags > 0 ? <span className="pill flagged">{c.open_flags}</span> : '—'}</td>
+            <td>{c.auto_applied > 0 ? c.auto_applied : '—'}</td>
             <td>
               {c.status === 'failed' && (
                 <button onClick={() => retryClip(c.id).then(load).catch((e) => setError(String(e)))}>Retry</button>

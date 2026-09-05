@@ -1,6 +1,9 @@
 'use client'
 
 import { useState } from 'react'
+import { FlagPanel } from '@/components/FlagPanel'
+import type { ResolveBody } from '@/lib/api'
+import { highlight } from '@/lib/highlight'
 import { romanize } from '@/lib/roman'
 import type { Segment } from '@/lib/types'
 
@@ -20,16 +23,21 @@ export function SegmentList({
   activeId,
   onPlay,
   onSave,
+  onResolve,
+  onRevert,
 }: {
   segments: Segment[]
   activeId: number | null
   onPlay: (segment: Segment) => void
   onSave: (id: number, text: string) => Promise<void>
+  onResolve: (flagId: number, body: ResolveBody) => Promise<void>
+  onRevert: (correctionId: number) => Promise<void>
 }) {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [revertError, setRevertError] = useState<string | null>(null)
 
   const startEdit = (s: Segment) => {
     setEditingId(s.id)
@@ -58,10 +66,19 @@ export function SegmentList({
     }
   }
 
+  const revert = (id: number) => {
+    setRevertError(null)
+    onRevert(id).catch((e) => setRevertError(e instanceof Error ? e.message : String(e)))
+  }
+
   return (
     <div>
+      {revertError && <p className="pill failed">{revertError}</p>}
       {segments.map((s) => {
         const colour = roleColour[s.speaker_role]
+        const openFlags = s.flags.filter((f) => f.status === 'open')
+        const resolvedFlags = s.flags.filter((f) => f.status !== 'open' && f.status !== 'auto_applied')
+        const activeCorrections = s.corrections.filter((c) => !c.reverted)
         return (
           <div
             key={s.id}
@@ -82,6 +99,9 @@ export function SegmentList({
                 </span>
               )}
               {s.edited && <span className="pill">edited</span>}
+              {openFlags.length > 0 && (
+                <span className="pill flagged">{openFlags.length} flag{openFlags.length > 1 ? 's' : ''}</span>
+              )}
             </div>
 
             {editingId === s.id ? (
@@ -116,11 +136,39 @@ export function SegmentList({
                 title="Double-click to correct"
                 style={{ marginTop: 4 }}
               >
-                {s.text_pa}
+                {highlight(s.text_pa, openFlags.map((f) => f.span_text))}
               </div>
             )}
 
             <div style={{ color: 'var(--muted)', fontSize: 13 }}>{romanize(s.text_pa)}</div>
+
+            {activeCorrections.map((c) => (
+              <div key={c.id} className="correction">
+                <span className={`pill ${c.source === 'auto' ? 'done' : ''}`}>
+                  {c.source === 'auto' ? 'auto-fixed' : 'corrected'}
+                </span>
+                <span className="gurmukhi" style={{ fontSize: 15, lineHeight: 1.4 }}>
+                  {c.before_text} → {c.after_text}
+                </span>
+                {c.context_similarity !== null && (
+                  <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+                    sim {c.context_similarity.toFixed(2)}
+                  </span>
+                )}
+                <button onClick={() => revert(c.id)}>Revert</button>
+              </div>
+            ))}
+
+            {openFlags.map((f) => (
+              <FlagPanel key={f.id} flag={f} onResolve={(body) => onResolve(f.id, body)} />
+            ))}
+
+            {resolvedFlags.length > 0 && (
+              <div style={{ color: 'var(--muted)', fontSize: 12, marginTop: 4 }}>
+                {resolvedFlags.length} flag{resolvedFlags.length > 1 ? 's' : ''} resolved
+                {' '}({resolvedFlags.map((f) => f.status).join(', ')})
+              </div>
+            )}
           </div>
         )
       })}
