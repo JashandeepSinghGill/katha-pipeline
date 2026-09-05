@@ -11,6 +11,9 @@ dependencies = [
     "sarvamai>=0.1.28",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    "rapidfuzz>=3.0",
+    "gurmukhiutils>=0.3",
+    "anthropic>=1.0",
 ]
 
 [project.optional-dependencies]

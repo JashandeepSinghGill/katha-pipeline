@@ -4,6 +4,7 @@ import sys
 
 import pytest
 
+from katha.appsettings import DEFAULTS
 from katha.config import Settings
 from katha.db import connect
 
@@ -14,7 +15,7 @@ TEST_DB_URL = os.environ.get(
     "KATHA_TEST_DATABASE_URL",
     "postgresql://katha:katha@localhost:5432/katha_test",
 )
-TABLES = ("words", "segments", "jobs", "audio_files", "clips")
+TABLES = ("corrections", "flags", "correction_ledger", "words", "segments", "jobs", "audio_files", "clips")
 
 
 def _default_device() -> str:
@@ -69,6 +70,8 @@ def db(settings):
         # so a test that *adds* a key doesn't leak either, in the same
         # teardown transaction as the truncate above.
         cur.execute("DELETE FROM settings")
-        cur.execute("INSERT INTO settings (key, value) VALUES ('files_per_day', '3')")
+        cur.executemany(
+            "INSERT INTO settings (key, value) VALUES (%s, %s)", list(DEFAULTS.items())
+        )
     conn.commit()
     conn.close()

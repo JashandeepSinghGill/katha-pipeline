@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     # exposed beyond localhost until it does.
     cors_origin: str = "http://localhost:3000"
 
+    # --- LLM (correction pass) -------------------------------------------
+    # 'claude_cli' runs `claude -p` on the Max subscription (the host user must
+    # have run `claude login`). 'anthropic_api' bills pay-as-you-go via the SDK.
+    llm_backend: str = "claude_cli"
+    claude_bin: str = "claude"
+    # Per LLM call. A 40-segment window normally returns in well under a minute.
+    llm_timeout_seconds: int = 900
+    # Only for llm_backend=anthropic_api. Empty = let the SDK read ANTHROPIC_API_KEY.
+    anthropic_api_key: str = ""
+    llm_max_tokens: int = 16000
+
 
 def get_settings() -> Settings:
     return Settings()
