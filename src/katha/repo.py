@@ -1,9 +1,12 @@
+import json
 from datetime import datetime
 from pathlib import Path
 
 import psycopg
 
+from katha.embed import vector_from_text, vector_to_text
 from katha.stages.assemble import _ms, role_for
+from katha.stages.ledger import LedgerEntry, merge_embeddings
 from katha.stages.types import AssembledSegment
 
 # Transaction contract: every function in this module opens and closes its own
@@ -299,7 +302,12 @@ def list_clips(conn: psycopg.Connection) -> list[dict]:
                    j.stage, j.status, j.attempts, j.last_error,
                    (SELECT count(*) FROM segments s WHERE s.clip_id = c.id) AS segment_count,
                    (SELECT count(*) FROM segments s
-                     WHERE s.clip_id = c.id AND s.timing_source = 'asr') AS loose_count
+                     WHERE s.clip_id = c.id AND s.timing_source = 'asr') AS loose_count,
+                   (SELECT count(*) FROM flags f JOIN segments s ON s.id = f.segment_id
+                     WHERE s.clip_id = c.id AND f.status = 'open') AS open_flags,
+                   (SELECT count(*) FROM corrections x JOIN segments s ON s.id = x.segment_id
+                     WHERE s.clip_id = c.id AND x.source = 'auto' AND x.reverted_at IS NULL)
+                     AS auto_applied
             FROM clips c JOIN jobs j ON j.clip_id = c.id
             ORDER BY c.created_at DESC
         """)
@@ -319,7 +327,28 @@ def list_segments(conn: psycopg.Connection, clip_id: int) -> list[dict]:
                         ) ORDER BY w.idx)
                         FROM words w WHERE w.segment_id = s.id),
                        '[]'::json
-                   ) AS words
+                   ) AS words,
+                   COALESCE(
+                       (SELECT json_agg(json_build_object(
+                            'id', f.id, 'span_text', f.span_text, 'kind', f.kind,
+                            'reason', f.reason, 'candidates', f.candidates,
+                            'ledger_id', f.ledger_id, 'status', f.status,
+                            'resolved_text', f.resolved_text
+                        ) ORDER BY f.id)
+                        FROM flags f WHERE f.segment_id = s.id),
+                       '[]'::json
+                   ) AS flags,
+                   COALESCE(
+                       (SELECT json_agg(json_build_object(
+                            'id', x.id, 'flag_id', x.flag_id, 'ledger_id', x.ledger_id,
+                            'source', x.source, 'before_text', x.before_text,
+                            'after_text', x.after_text,
+                            'context_similarity', x.context_similarity,
+                            'reverted', x.reverted_at IS NOT NULL
+                        ) ORDER BY x.id)
+                        FROM corrections x WHERE x.segment_id = s.id),
+                       '[]'::json
+                   ) AS corrections
             FROM segments s WHERE s.clip_id = %s ORDER BY s.idx
         """, (clip_id,))
         rows = cur.fetchall()
@@ -379,3 +408,398 @@ def requeue_job(conn: psycopg.Connection, clip_id: int) -> bool:
         requeued = cur.rowcount == 1
     conn.commit()
     return requeued
+
+
+# --- settings ---------------------------------------------------------------
+
+def get_setting(conn: psycopg.Connection, key: str, default: str) -> str:
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+    conn.rollback()
+    return row["value"] if row else default
+
+
+def get_setting_float(conn: psycopg.Connection, key: str, default: float) -> float:
+    try:
+        return float(get_setting(conn, key, str(default)))
+    except ValueError:
+        return default
+
+
+def get_setting_bool(conn: psycopg.Connection, key: str, default: bool) -> bool:
+    raw = get_setting(conn, key, "true" if default else "false").strip().lower()
+    return raw in ("true", "1", "yes", "on")
+
+
+def get_all_settings(conn: psycopg.Connection) -> dict[str, str]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT key, value FROM settings ORDER BY key")
+        rows = cur.fetchall()
+    conn.rollback()
+    return {r["key"]: r["value"] for r in rows}
+
+
+def set_setting(conn: psycopg.Connection, key: str, value: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO settings (key, value) VALUES (%s, %s)"
+            " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (key, value),
+        )
+    conn.commit()
+
+
+# --- segments (text) --------------------------------------------------------
+
+def list_segment_texts(conn: psycopg.Connection, clip_id: int) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, idx, speaker_role, text_pa FROM segments"
+            " WHERE clip_id = %s ORDER BY idx",
+            (clip_id,),
+        )
+        rows = cur.fetchall()
+    conn.rollback()
+    return rows
+
+
+def get_segment(conn: psycopg.Connection, segment_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, clip_id, idx, speaker_role, text_pa, edited FROM segments WHERE id = %s",
+            (segment_id,),
+        )
+        row = cur.fetchone()
+    conn.rollback()
+    return row
+
+
+# --- flags ------------------------------------------------------------------
+
+FlagRow = tuple[int, str, str, str, list[str]]  # segment_id, span_text, kind, reason, candidates
+
+
+def save_flags(conn: psycopg.Connection, clip_id: int, rows: list[FlagRow]) -> int:
+    """Replace this clip's OPEN flags with `rows`. Resolved flags are kept, and
+    a row whose (segment, span) already has a non-open flag is skipped, so a
+    re-run of the correct stage never duplicates something the admin or the
+    ledger has already dealt with."""
+    inserted = 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM flags WHERE status = 'open' AND segment_id IN"
+            " (SELECT id FROM segments WHERE clip_id = %s)",
+            (clip_id,),
+        )
+        for segment_id, span, kind, reason, candidates in rows:
+            cur.execute(
+                """
+                INSERT INTO flags (segment_id, span_text, kind, reason, candidates)
+                SELECT %s, %s, %s, %s, %s::jsonb
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM flags WHERE segment_id = %s AND span_text = %s
+                )
+                """,
+                (segment_id, span, kind, reason, json.dumps(candidates, ensure_ascii=False),
+                 segment_id, span),
+            )
+            inserted += cur.rowcount
+    conn.commit()
+    return inserted
+
+
+_FLAG_COLS = (
+    "f.id, f.segment_id, f.span_text, f.kind, f.reason, f.candidates, f.ledger_id,"
+    " f.status, f.resolved_text, f.resolved_at, f.created_at, s.text_pa, s.clip_id"
+)
+
+
+def list_open_flags(conn: psycopg.Connection, clip_id: int) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {_FLAG_COLS} FROM flags f JOIN segments s ON s.id = f.segment_id"
+            " WHERE s.clip_id = %s AND f.status = 'open' ORDER BY s.idx, f.id",
+            (clip_id,),
+        )
+        rows = cur.fetchall()
+    conn.rollback()
+    return rows
+
+
+def get_flag(conn: psycopg.Connection, flag_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {_FLAG_COLS} FROM flags f JOIN segments s ON s.id = f.segment_id"
+            " WHERE f.id = %s",
+            (flag_id,),
+        )
+        row = cur.fetchone()
+    conn.rollback()
+    return row
+
+
+def set_flag_suggestion(
+    conn: psycopg.Connection, flag_id: int, ledger_id: int, candidates: list[str]
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE flags SET ledger_id = %s, candidates = %s::jsonb WHERE id = %s",
+            (ledger_id, json.dumps(candidates, ensure_ascii=False), flag_id),
+        )
+    conn.commit()
+
+
+def resolve_flag(
+    conn: psycopg.Connection,
+    flag_id: int,
+    status: str,
+    resolved_text: str | None = None,
+    ledger_id: int | None = None,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE flags SET status = %s, resolved_text = %s, resolved_at = now(),"
+            " ledger_id = COALESCE(%s, ledger_id) WHERE id = %s",
+            (status, resolved_text, ledger_id, flag_id),
+        )
+    conn.commit()
+
+
+def reopen_flag(conn: psycopg.Connection, flag_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE flags SET status = 'open', resolved_text = NULL, resolved_at = NULL"
+            " WHERE id = %s",
+            (flag_id,),
+        )
+    conn.commit()
+
+
+# --- corrections ------------------------------------------------------------
+
+def _insert_correction(
+    cur, *, segment_id, flag_id, ledger_id, source, before, after, similarity
+) -> int:
+    cur.execute(
+        "INSERT INTO corrections (segment_id, flag_id, ledger_id, source, before_text,"
+        " after_text, context_similarity) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        (segment_id, flag_id, ledger_id, source, before, after, similarity),
+    )
+    return cur.fetchone()["id"]
+
+
+def add_correction(
+    conn: psycopg.Connection, *, segment_id: int, flag_id: int | None, ledger_id: int | None,
+    source: str, before: str, after: str, similarity: float | None,
+) -> int:
+    with conn.cursor() as cur:
+        cid = _insert_correction(
+            cur, segment_id=segment_id, flag_id=flag_id, ledger_id=ledger_id,
+            source=source, before=before, after=after, similarity=similarity,
+        )
+    conn.commit()
+    return cid
+
+
+def get_correction(conn: psycopg.Connection, correction_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM corrections WHERE id = %s", (correction_id,))
+        row = cur.fetchone()
+    conn.rollback()
+    return row
+
+
+def mark_reverted(conn: psycopg.Connection, correction_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE corrections SET reverted_at = now() WHERE id = %s AND reverted_at IS NULL",
+            (correction_id,),
+        )
+    conn.commit()
+
+
+def apply_auto_correction(
+    conn: psycopg.Connection, *, flag_id: int, segment_id: int, ledger_id: int,
+    new_text: str, before: str, after: str, similarity: float,
+) -> int:
+    """Segment rewrite + correction log + flag status + ledger usage, atomically."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE segments SET text_pa = %s, edited = true WHERE id = %s",
+            (new_text, segment_id),
+        )
+        cid = _insert_correction(
+            cur, segment_id=segment_id, flag_id=flag_id, ledger_id=ledger_id,
+            source="auto", before=before, after=after, similarity=similarity,
+        )
+        cur.execute(
+            "UPDATE flags SET status = 'auto_applied', resolved_text = %s, resolved_at = now(),"
+            " ledger_id = %s WHERE id = %s",
+            (after, ledger_id, flag_id),
+        )
+        cur.execute(
+            "UPDATE correction_ledger SET times_applied = times_applied + 1,"
+            " last_used_at = now() WHERE id = %s",
+            (ledger_id,),
+        )
+    conn.commit()
+    return cid
+
+
+# --- ledger -----------------------------------------------------------------
+
+_LEDGER_COLS = (
+    "id, canonical_gurmukhi, romanized, surface_forms, entity_type, english_gloss,"
+    " context_embedding::text AS context_embedding, embedding_model, confidence_threshold,"
+    " times_applied, retired, created_by, created_at, last_used_at"
+)
+
+
+def ledger_entries(conn: psycopg.Connection) -> list[LedgerEntry]:
+    """Every non-retired entry, in the pure matcher's shape."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT {_LEDGER_COLS} FROM correction_ledger WHERE NOT retired ORDER BY id")
+        rows = cur.fetchall()
+    conn.rollback()
+    return [
+        LedgerEntry(
+            id=r["id"],
+            canonical=r["canonical_gurmukhi"],
+            surface_forms=tuple(r["surface_forms"]),
+            embedding=(
+                tuple(vector_from_text(r["context_embedding"]))
+                if r["context_embedding"] else None
+            ),
+            embedding_model=r["embedding_model"],
+            threshold=float(r["confidence_threshold"]),
+        )
+        for r in rows
+    ]
+
+
+def list_ledger(conn: psycopg.Connection, q: str | None, include_retired: bool) -> list[dict]:
+    where = [] if include_retired else ["NOT retired"]
+    params: list = []
+    if q:
+        where.append(
+            "(canonical_gurmukhi ILIKE %s OR romanized ILIKE %s"
+            " OR EXISTS (SELECT 1 FROM unnest(surface_forms) sf WHERE sf ILIKE %s))"
+        )
+        like = f"%{q}%"
+        params += [like, like, like]
+    sql = f"SELECT {_LEDGER_COLS} FROM correction_ledger"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY times_applied DESC, created_at DESC"
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    conn.rollback()
+    return rows
+
+
+def get_ledger(conn: psycopg.Connection, ledger_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT {_LEDGER_COLS} FROM correction_ledger WHERE id = %s", (ledger_id,))
+        row = cur.fetchone()
+    conn.rollback()
+    return row
+
+
+def upsert_ledger(
+    conn: psycopg.Connection, *, canonical: str, romanized: str, surface_form: str | None,
+    entity_type: str, english_gloss: str | None, embedding: list[float] | None,
+    embedding_model: str | None, threshold: float, created_by: str = "admin",
+) -> int:
+    """Insert, or teach an existing row: append the surface form, keep the
+    existing threshold and gloss unless absent, and merge the context
+    embedding (same model) or replace it (different model). A retired entry
+    that gets taught again is revived."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {_LEDGER_COLS} FROM correction_ledger WHERE canonical_gurmukhi = %s"
+            " FOR UPDATE",
+            (canonical,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            forms = [surface_form] if surface_form and surface_form != canonical else []
+            cur.execute(
+                "INSERT INTO correction_ledger (canonical_gurmukhi, romanized, surface_forms,"
+                " entity_type, english_gloss, context_embedding, embedding_model,"
+                " confidence_threshold, created_by)"
+                " VALUES (%s,%s,%s,%s,%s,%s::vector,%s,%s,%s) RETURNING id",
+                (canonical, romanized, forms, entity_type, english_gloss,
+                 vector_to_text(embedding) if embedding else None,
+                 embedding_model if embedding else None, threshold, created_by),
+            )
+            ledger_id = cur.fetchone()["id"]
+        else:
+            forms = list(row["surface_forms"])
+            if surface_form and surface_form != canonical and surface_form not in forms:
+                forms.append(surface_form)
+            old_vec = (
+                vector_from_text(row["context_embedding"]) if row["context_embedding"] else None
+            )
+            if embedding is None:
+                new_vec, new_model = old_vec, row["embedding_model"]
+            elif old_vec is not None and row["embedding_model"] == embedding_model:
+                new_vec, new_model = merge_embeddings(old_vec, embedding), embedding_model
+            else:
+                new_vec, new_model = list(embedding), embedding_model
+            cur.execute(
+                "UPDATE correction_ledger SET surface_forms = %s, romanized = %s,"
+                " english_gloss = COALESCE(english_gloss, %s), context_embedding = %s::vector,"
+                " embedding_model = %s, retired = false WHERE id = %s",
+                (forms, romanized, english_gloss,
+                 vector_to_text(new_vec) if new_vec else None, new_model, row["id"]),
+            )
+            ledger_id = row["id"]
+    conn.commit()
+    return ledger_id
+
+
+_LEDGER_EDITABLE = {
+    "canonical_gurmukhi", "romanized", "surface_forms", "entity_type",
+    "english_gloss", "confidence_threshold", "retired",
+}
+
+
+def update_ledger(conn: psycopg.Connection, ledger_id: int, **fields) -> bool:
+    sets, params = [], []
+    for column, value in fields.items():
+        if column not in _LEDGER_EDITABLE:
+            raise ValueError(f"not an editable ledger column: {column}")
+        sets.append(f"{column} = %s")
+        params.append(value)
+    if not sets:
+        return False
+    params.append(ledger_id)
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE correction_ledger SET {', '.join(sets)} WHERE id = %s", params)
+        changed = cur.rowcount == 1
+    conn.commit()
+    return changed
+
+
+def bump_ledger_use(conn: psycopg.Connection, ledger_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE correction_ledger SET times_applied = times_applied + 1,"
+            " last_used_at = now() WHERE id = %s",
+            (ledger_id,),
+        )
+    conn.commit()
+
+
+def top_gazetteer(conn: psycopg.Connection, limit: int = 200) -> list[tuple[str, str]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT canonical_gurmukhi, entity_type FROM correction_ledger WHERE NOT retired"
+            " ORDER BY times_applied DESC, created_at LIMIT %s",
+            (limit,),
+        )
+        rows = cur.fetchall()
+    conn.rollback()
+    return [(r["canonical_gurmukhi"], r["entity_type"]) for r in rows]
