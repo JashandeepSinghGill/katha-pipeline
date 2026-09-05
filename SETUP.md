@@ -249,6 +249,22 @@ Each window's validated output is cached in `work/<clip>/flags/<n>.json`, so a f
 /srv/media/katha/work/      per-clip working files
 ```
 
+### Zira as built (2026-09-05)
+
+The pipeline lives in its own **unprivileged LXC, CT 213 `katha`** on the Proxmox host `pve` (10.0.0.7), created with `pct create` next to the existing servarr (212) and vault (211) containers:
+
+| | |
+|---|---|
+| Address | `10.0.0.14/24` on `vmbr0`, gateway 10.0.0.1 |
+| OS / Python | Ubuntu 24.04 template, system Python 3.12; the denoiser venv uses a uv-managed 3.11 |
+| Resources | 8 cores, 12 GB RAM, 2 GB swap, 40 GB rootfs on the `data` pool (`/mnt/data`) |
+| `/srv/media/katha/archive` | bind mount of the host's `/mnt/media/KATHA` (the 432-file katha archive), **read-only** |
+| `/srv/media/katha/work` | bind mount of the host's `/mnt/data/katha` (670 GB free), owned by uid 1000 |
+| GPU | the NVIDIA T550's device nodes are passed through (frigate's pattern, with the current `504` major for `nvidia-uvm`), but **no NVIDIA userspace is installed inside the CT yet** — `KATHA_DEVICE=cuda` needs the driver's user libs (`NVIDIA-Linux-x86_64-595.80.run --no-kernel-module`, matching the host's 595.80) |
+| Access | `pct exec 213 -- …` from the host, or `pct enter 213`. Root **password** SSH is disabled by the template (`PermitRootLogin prohibit-password`); add your SSH key or flip that line in `/etc/ssh/sshd_config` yourself |
+
+The archive is mounted read-only on purpose: the watcher only *reads* the watch folder (it never moves files), so point `KATHA_WATCH_DIR` at `/srv/media/katha/archive/SGND JI` and the daily throttle will register three files a day.
+
 ### Set up
 
 ```bash
@@ -279,14 +295,21 @@ KATHA_SARVAM_API_KEY=<your key>
 
 DeepFilterNet's torch pin conflicts with the aligner's, so it gets its own environment and is called as a binary. Nothing in the pipeline ever imports it.
 
+`deepfilterlib` 0.5.6 ships Linux wheels for **CPython 3.10 and 3.11 only** (anything newer makes pip try to compile it and demand a Rust toolchain), and DeepFilterNet needs `numpy<2`. Ubuntu 24.04's system Python is 3.12, so build the venv on a uv-managed 3.11. This is the recipe that was verified on Zira on 2026-09-05:
+
 ```bash
-sudo python3.11 -m venv /opt/venvs/deepfilternet
-sudo /opt/venvs/deepfilternet/bin/pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-sudo /opt/venvs/deepfilternet/bin/pip install deepfilternet==0.5.6
-/opt/venvs/deepfilternet/bin/deepFilter --help    # must print usage
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv python install 3.11
+uv venv --python 3.11 /opt/venvs/deepfilternet
+PY=/opt/venvs/deepfilternet/bin/python
+# torch 2.5.1: the last line whose torchaudio still has its own audio I/O (2.9+ needs torchcodec)
+uv pip install --python $PY torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python $PY "deepfilternet==0.5.6" soundfile "numpy<2"
+/opt/venvs/deepfilternet/bin/deepFilter --help    # must print usage (a torchaudio deprecation warning is normal)
 ```
 
-Note DeepFilterNet needs Python ≤3.12 (no 3.13 wheels). That's fine — it's a separate venv.
+The DeepFilterNet3 weights are bundled with the package and unpack to `~/.cache/DeepFilterNet` on first run — no download. On Zira's 8-core container a 60 s excerpt takes about 1.6 s of model time (≈37× realtime on CPU), so the 4-hour subprocess timeout has enormous headroom. The `fatal: not a git repository` line it prints is harmless (it tries to log its own git revision).
 
 ### Log the service user into Claude
 
