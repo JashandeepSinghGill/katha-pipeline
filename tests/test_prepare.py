@@ -6,11 +6,40 @@ import pytest
 from katha.stages import prepare
 
 
-def test_denoised_path_matches_deepfilternet_naming():
-    # DeepFilterNet writes <stem>_<model>.wav into --output-dir
+@pytest.mark.parametrize("flavor, expected", [
+    # the python CLI writes <stem>_<model>.wav into its --output-dir
+    ("python", Path("/w/1/native_DeepFilterNet3.wav")),
+    # the rust binary writes <same basename> into its -o dir, so that dir is a subdir
+    ("rust", Path("/w/1/denoised/native.wav")),
+])
+def test_denoised_path_per_flavor(flavor, expected):
     assert prepare.denoised_path(
-        Path("/w/1/native.wav"), Path("/w/1"), "DeepFilterNet3"
-    ) == Path("/w/1/native_DeepFilterNet3.wav")
+        Path("/w/1/native.wav"), Path("/w/1"), "DeepFilterNet3", flavor
+    ) == expected
+
+
+def test_denoise_cmd_python_flavor_is_the_deepfilter_cli_shape():
+    src, out = Path("/w/1/native.wav"), Path("/w/1")
+    assert prepare.denoise_cmd(src, out, "/v/bin/deepFilter", "DeepFilterNet3", "python") == [
+        "/v/bin/deepFilter", str(src), "-o", str(out), "-m", "DeepFilterNet3",
+    ]
+
+
+def test_denoise_cmd_rust_flavor_compensates_delay_and_writes_to_a_subdir():
+    src, out = Path("/w/1/native.wav"), Path("/w/1")
+    cmd = prepare.denoise_cmd(src, out, "/opt/deep-filter/deep-filter", "DeepFilterNet3", "rust")
+    # -D is load-bearing: without it deep-filter's output trails the input by 30 ms
+    assert cmd == ["/opt/deep-filter/deep-filter", "-D", "-o", str(out / "denoised"), str(src)]
+    # a model *name* is not a path: only a .tar.gz is passed through as -m
+    with_model = prepare.denoise_cmd(src, out, "/opt/deep-filter/deep-filter", "/m/DF3.tar.gz", "rust")
+    assert with_model[-3:] == ["-m", "/m/DF3.tar.gz", str(src)]
+
+
+def test_denoise_cmd_and_path_reject_unknown_flavor():
+    with pytest.raises(prepare.PrepareError, match="denoise_flavor"):
+        prepare.denoise_cmd(Path("/w/1/native.wav"), Path("/w/1"), "x", "m", "cpp")
+    with pytest.raises(prepare.PrepareError, match="denoise_flavor"):
+        prepare.denoised_path(Path("/w/1/native.wav"), Path("/w/1"), "m", "cpp")
 
 
 def test_to_mono_wav_cmd_pins_16k_pcm_for_asr():
@@ -112,6 +141,7 @@ def test_probe_raises_prepare_error_on_unparsable_json(monkeypatch, tmp_path):
 
 def test_prepare_clip_raises_when_denoiser_produces_no_output(tone_wav, tmp_path, settings, monkeypatch):
     monkeypatch.setattr(settings, "denoise_enabled", True)
+    monkeypatch.setattr(settings, "denoise_flavor", "python")
 
     # A stub "denoiser" that exits 0 without writing anything, despite being handed
     # denoise_cmd()'s full arg list ([bin_path, src, "-o", out_dir, "-m", model]).
@@ -128,3 +158,32 @@ def test_prepare_clip_raises_when_denoiser_produces_no_output(tone_wav, tmp_path
 
     with pytest.raises(prepare.PrepareError, match="produced no output"):
         prepare.prepare_clip(tone_wav, tmp_path / "work", settings)
+
+
+def test_prepare_clip_rust_flavor_reads_the_denoised_subdir(tone_wav, tmp_path, settings, monkeypatch):
+    monkeypatch.setattr(settings, "denoise_enabled", True)
+    monkeypatch.setattr(settings, "denoise_flavor", "rust")
+    # A stand-in for deep-filter: argv is [-D, -o, <out_dir>, <src>]; it copies
+    # <src> into <out_dir> under the SAME basename, exactly as the real binary does,
+    # and refuses to run without -D so a dropped flag fails the test.
+    if sys.platform == "win32":
+        stub = tmp_path / "fake_deep_filter.bat"
+        stub.write_text('@echo off\r\nif not "%~1"=="-D" exit /b 3\r\nif not exist "%~3" mkdir "%~3"\r\ncopy /y "%~4" "%~3\\" >nul\r\nexit /b 0\r\n')
+    else:
+        stub = tmp_path / "fake_deep_filter.sh"
+        stub.write_text('#!/bin/sh\n[ "$1" = "-D" ] || exit 3\nmkdir -p "$3" && cp "$4" "$3/"\n')
+        stub.chmod(0o755)
+    monkeypatch.setattr(settings, "denoise_bin", str(stub))
+
+    result = prepare.prepare_clip(tone_wav, tmp_path / "work", settings)
+    assert result.denoised == tmp_path / "work" / "denoised" / "native.wav"
+    assert result.denoised.exists()
+    assert result.asr_ready.exists()
+
+
+def test_prepare_clip_rejects_unknown_flavor_before_doing_any_work(tone_wav, tmp_path, settings, monkeypatch):
+    monkeypatch.setattr(settings, "denoise_enabled", True)
+    monkeypatch.setattr(settings, "denoise_flavor", "cpp")
+    with pytest.raises(prepare.PrepareError, match="denoise_flavor"):
+        prepare.prepare_clip(tone_wav, tmp_path / "work", settings)
+    assert not (tmp_path / "work" / "native.wav").exists()

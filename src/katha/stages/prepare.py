@@ -26,12 +26,38 @@ def to_mono_wav_cmd(src: Path, dst: Path, sample_rate: int | None) -> list[str]:
     return cmd + ["-c:a", "pcm_s16le", str(dst)]
 
 
-def denoise_cmd(src: Path, out_dir: Path, bin_path: str, model: str) -> list[str]:
-    return [bin_path, str(src), "-o", str(out_dir), "-m", model]
+DENOISE_FLAVORS = ("rust", "python")
 
 
-def denoised_path(src: Path, out_dir: Path, model: str) -> Path:
-    return out_dir / f"{src.stem}_{model}.wav"
+def _rust_out_dir(out_dir: Path) -> Path:
+    # deep-filter writes <out_dir>/<same basename>, so it must never share a
+    # directory with its input or it would overwrite native.wav in place.
+    return out_dir / "denoised"
+
+
+def denoise_cmd(
+    src: Path, out_dir: Path, bin_path: str, model: str, flavor: str = "rust"
+) -> list[str]:
+    if flavor == "python":
+        return [bin_path, str(src), "-o", str(out_dir), "-m", model]
+    if flavor == "rust":
+        # -D compensates the STFT + model lookahead delay. Without it the output
+        # trails the input by 30 ms (1440 samples at 48 kHz, measured on Zira),
+        # which would shift every word timestamp relative to the native.wav the
+        # review UI plays. The python CLI compensates by default.
+        cmd = [bin_path, "-D", "-o", str(_rust_out_dir(out_dir))]
+        if model.endswith(".tar.gz"):
+            cmd += ["-m", model]
+        return cmd + [str(src)]
+    raise PrepareError(f"unknown denoise_flavor {flavor!r}; expected one of {DENOISE_FLAVORS}")
+
+
+def denoised_path(src: Path, out_dir: Path, model: str, flavor: str = "rust") -> Path:
+    if flavor == "python":
+        return out_dir / f"{src.stem}_{model}.wav"
+    if flavor == "rust":
+        return _rust_out_dir(out_dir) / src.name
+    raise PrepareError(f"unknown denoise_flavor {flavor!r}; expected one of {DENOISE_FLAVORS}")
 
 
 def probe_cmd(src: Path) -> list[str]:
@@ -96,6 +122,11 @@ def probe(src: Path, timeout: int = DEFAULT_SUBPROCESS_TIMEOUT_SECONDS) -> tuple
 def prepare_clip(source: Path, work_dir: Path, settings: Settings) -> PrepareResult:
     work_dir.mkdir(parents=True, exist_ok=True)
     timeout = settings.subprocess_timeout_seconds
+    flavor = settings.denoise_flavor
+    if settings.denoise_enabled and flavor not in DENOISE_FLAVORS:
+        raise PrepareError(
+            f"unknown denoise_flavor {flavor!r}; expected one of {DENOISE_FLAVORS}"
+        )
     duration, sample_rate = probe(source, timeout=timeout)
     if duration > settings.max_audio_seconds:
         raise PrepareError(
@@ -110,11 +141,13 @@ def prepare_clip(source: Path, work_dir: Path, settings: Settings) -> PrepareRes
 
     denoised: Path | None = None
     if settings.denoise_enabled:
+        if flavor == "rust":
+            _rust_out_dir(work_dir).mkdir(parents=True, exist_ok=True)
         _run(
-            denoise_cmd(native, work_dir, settings.denoise_bin, settings.denoise_model),
+            denoise_cmd(native, work_dir, settings.denoise_bin, settings.denoise_model, flavor),
             timeout=timeout,
         )
-        denoised = denoised_path(native, work_dir, settings.denoise_model)
+        denoised = denoised_path(native, work_dir, settings.denoise_model, flavor)
         if not denoised.exists():
             raise PrepareError(f"denoiser produced no output at {denoised}")
 

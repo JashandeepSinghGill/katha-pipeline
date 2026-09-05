@@ -26,7 +26,13 @@ class Settings(BaseSettings):
 
     device: str = "cuda"
     denoise_enabled: bool = True
-    denoise_bin: str = "deepFilter"
+    # 'rust': the streaming `deep-filter` release binary (constant ~1 GB RAM).
+    # 'python': the DeepFilterNet pip CLI, which loads the whole clip into RAM
+    # (~9.5 MB per second of audio) and was OOM-killed on a 43-minute clip.
+    denoise_flavor: str = "rust"
+    denoise_bin: str = "/opt/deep-filter/deep-filter"
+    # python flavour: model name. rust flavour: optional path to a model .tar.gz
+    # (anything else means "use the embedded DeepFilterNet3").
     denoise_model: str = "DeepFilterNet3"
 
     max_audio_seconds: int = 7200

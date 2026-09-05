@@ -260,6 +260,7 @@ The pipeline lives in its own **unprivileged LXC, CT 213 `katha`** on the Proxmo
 | Resources | 8 cores, 12 GB RAM, 2 GB swap, 40 GB rootfs on the `data` pool (`/mnt/data`) |
 | `/srv/media/katha/archive` | bind mount of the host's `/mnt/media/KATHA` (the 432-file katha archive), **read-only** |
 | `/srv/media/katha/work` | bind mount of the host's `/mnt/data/katha` (670 GB free), owned by uid 1000 |
+| Denoiser | `/opt/deep-filter/deep-filter` (Rust, streaming — the one the pipeline uses); the python CLI is also installed at `/opt/venvs/deepfilternet` for experiments |
 | GPU | the NVIDIA T550's device nodes are passed through (frigate's pattern, with the current `504` major for `nvidia-uvm`), but **no NVIDIA userspace is installed inside the CT yet** — `KATHA_DEVICE=cuda` needs the driver's user libs (`NVIDIA-Linux-x86_64-595.80.run --no-kernel-module`, matching the host's 595.80) |
 | Access | `pct exec 213 -- …` from the host, or `pct enter 213`. Root **password** SSH is disabled by the template (`PermitRootLogin prohibit-password`); add your SSH key or flip that line in `/etc/ssh/sshd_config` yourself |
 
@@ -291,11 +292,33 @@ KATHA_DENOISE_BIN=/opt/venvs/deepfilternet/bin/deepFilter
 KATHA_SARVAM_API_KEY=<your key>
 ```
 
-### Install the denoiser (its own venv)
+### Install the denoiser
 
-DeepFilterNet's torch pin conflicts with the aligner's, so it gets its own environment and is called as a binary. Nothing in the pipeline ever imports it.
+DeepFilterNet ships two front-ends, and only one of them can handle a whole katha clip:
 
-`deepfilterlib` 0.5.6 ships Linux wheels for **CPython 3.10 and 3.11 only** (anything newer makes pip try to compile it and demand a Rust toolchain), and DeepFilterNet needs `numpy<2`. Ubuntu 24.04's system Python is 3.12, so build the venv on a uv-managed 3.11. This is the recipe that was verified on Zira on 2026-09-05:
+| | `deep-filter` (Rust release binary) | `deepFilter` (pip package CLI) |
+|---|---|---|
+| Memory on a 43-min clip | **1.0 GB**, constant (streams) | ~9.5 MB per second of audio → **24 GB, OOM-killed** on Zira |
+| Speed on 8 CPU cores | 5 min 58 s for 43 min (≈7× realtime) | faster per second, but only on clips that fit in RAM |
+| Delay compensation | **must pass `-D`** (the pipeline does) — otherwise the output trails by 30 ms | on by default |
+| Quality | identical noise floor (−98 dBFS on the same excerpt) | — |
+
+So the pipeline defaults to the Rust binary (`KATHA_DENOISE_FLAVOR=rust`). Install it with one download — it is a static musl build with the DeepFilterNet3 model embedded:
+
+```bash
+sudo mkdir -p /opt/deep-filter
+sudo curl -L -o /opt/deep-filter/deep-filter \
+  https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/deep-filter-0.5.6-x86_64-unknown-linux-musl
+sudo chmod +x /opt/deep-filter/deep-filter
+/opt/deep-filter/deep-filter --version      # deep_filter 0.5.6
+```
+
+Set `KATHA_DENOISE_BIN=/opt/deep-filter/deep-filter`. (There is a Windows build too, `deep-filter-0.5.6-x86_64-pc-windows-msvc.exe`, if you want denoising on locally.)
+
+<details>
+<summary>The python CLI, if you ever need it (short files only)</summary>
+
+`deepfilterlib` 0.5.6 ships Linux wheels for CPython 3.10 and 3.11 only (newer Pythons make pip try to compile it and demand Rust), and it needs `numpy<2`. On Ubuntu 24.04 (system Python 3.12) build it on a uv-managed 3.11:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -303,13 +326,13 @@ export PATH="$HOME/.local/bin:$PATH"
 uv python install 3.11
 uv venv --python 3.11 /opt/venvs/deepfilternet
 PY=/opt/venvs/deepfilternet/bin/python
-# torch 2.5.1: the last line whose torchaudio still has its own audio I/O (2.9+ needs torchcodec)
 uv pip install --python $PY torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
 uv pip install --python $PY "deepfilternet==0.5.6" soundfile "numpy<2"
-/opt/venvs/deepfilternet/bin/deepFilter --help    # must print usage (a torchaudio deprecation warning is normal)
+/opt/venvs/deepfilternet/bin/deepFilter --help
 ```
 
-The DeepFilterNet3 weights are bundled with the package and unpack to `~/.cache/DeepFilterNet` on first run — no download. On Zira's 8-core container a 60 s excerpt takes about 1.6 s of model time (≈37× realtime on CPU), so the 4-hour subprocess timeout has enormous headroom. The `fatal: not a git repository` line it prints is harmless (it tries to log its own git revision).
+Then `KATHA_DENOISE_FLAVOR=python` and `KATHA_DENOISE_BIN=/opt/venvs/deepfilternet/bin/deepFilter`. Remember the memory figure above before pointing it at a real clip.
+</details>
 
 ### Log the service user into Claude
 
