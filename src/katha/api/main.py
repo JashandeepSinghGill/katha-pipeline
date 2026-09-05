@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
@@ -7,10 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from katha import repo
+from katha import appsettings, repo, review
 from katha.api.ranges import parse_range
 from katha.config import Settings, get_settings
 from katha.db import connect
+from katha.embed import HashingEmbedder
+from katha.text import romanize
 
 app = FastAPI(title="Katha Pipeline")
 # CORS is a browser-only control: curl and other non-browser HTTP clients ignore
@@ -44,6 +46,45 @@ class ReciterPatch(BaseModel):
 
 class SegmentPatch(BaseModel):
     text_pa: str
+
+
+ENTITY_TYPES = Literal["person", "place", "date", "book", "title", "term", "other"]
+# Must be the same embedder the worker uses (worker.Pipeline defaults to it too):
+# a ledger row learned here is only auto-applicable if its embedding_model
+# matches what the worker embeds with.
+_embedder = HashingEmbedder()
+
+
+class RememberSpec(BaseModel):
+    entity_type: ENTITY_TYPES
+    english_gloss: str | None = None
+
+
+class ResolveBody(BaseModel):
+    action: Literal["accept", "reject"]
+    text: str | None = None
+    remember: RememberSpec | None = None
+
+
+class LedgerCreate(BaseModel):
+    canonical_gurmukhi: str
+    surface_forms: list[str] = []
+    entity_type: ENTITY_TYPES
+    english_gloss: str | None = None
+    confidence_threshold: float | None = None
+
+
+class LedgerPatch(BaseModel):
+    canonical_gurmukhi: str | None = None
+    surface_forms: list[str] | None = None
+    entity_type: ENTITY_TYPES | None = None
+    english_gloss: str | None = None
+    confidence_threshold: float | None = None
+    retired: bool | None = None
+
+
+class SettingsBody(BaseModel):
+    values: dict[str, str]
 
 
 @app.get("/api/clips")
@@ -125,3 +166,103 @@ def get_audio(clip_id: int, range: str | None = Header(default=None), conn=Depen
     return StreamingResponse(
         stream(), status_code=status, headers=headers, media_type="audio/wav"
     )
+
+
+# --- correction review ------------------------------------------------------
+
+
+def _review(fn, *args):
+    try:
+        return fn(*args)
+    except review.ReviewError as exc:
+        raise HTTPException(exc.status, str(exc)) from None
+
+
+@app.post("/api/flags/{flag_id}/resolve")
+def resolve_flag(flag_id: int, body: ResolveBody, conn=Depends(get_conn)):
+    if body.action == "reject":
+        _review(review.reject_flag, conn, flag_id)
+        return {"ok": True, "status": "rejected"}
+    if body.text is None or not body.text.strip():
+        raise HTTPException(400, "accept requires non-empty text")
+    remember = body.remember.model_dump() if body.remember else None
+    out = _review(review.accept_flag, conn, _embedder, flag_id, body.text, remember)
+    return {"ok": True, "status": "accepted", **out}
+
+
+@app.post("/api/corrections/{correction_id}/revert")
+def revert_correction(correction_id: int, conn=Depends(get_conn)):
+    return {"ok": True, **_review(review.revert_correction, conn, correction_id)}
+
+
+@app.get("/api/ledger")
+def list_ledger(q: str | None = None, include_retired: bool = False, conn=Depends(get_conn)):
+    return {"entries": repo.list_ledger(conn, q, include_retired)}
+
+
+@app.post("/api/ledger")
+def create_ledger(body: LedgerCreate, conn=Depends(get_conn)):
+    canonical = body.canonical_gurmukhi.strip()
+    if not canonical:
+        raise HTTPException(400, "canonical_gurmukhi must not be empty")
+    threshold = body.confidence_threshold
+    if threshold is None:
+        threshold = repo.get_setting_float(conn, "ledger_context_threshold", 0.8)
+    elif not 0.0 <= threshold <= 1.0:
+        raise HTTPException(400, "confidence_threshold must be within 0..1")
+    ledger_id = repo.upsert_ledger(
+        conn, canonical=canonical, romanized=romanize(canonical), surface_form=None,
+        entity_type=body.entity_type, english_gloss=body.english_gloss, embedding=None,
+        embedding_model=None, threshold=threshold,
+    )
+    forms = [f.strip() for f in body.surface_forms if f.strip() and f.strip() != canonical]
+    if forms:
+        existing = repo.get_ledger(conn, ledger_id)["surface_forms"]
+        merged = list(dict.fromkeys([*existing, *forms]))
+        repo.update_ledger(conn, ledger_id, surface_forms=merged)
+    return {"ok": True, "id": ledger_id}
+
+
+@app.patch("/api/ledger/{ledger_id}")
+def patch_ledger(ledger_id: int, body: LedgerPatch, conn=Depends(get_conn)):
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "canonical_gurmukhi" in fields:
+        fields["canonical_gurmukhi"] = fields["canonical_gurmukhi"].strip()
+        if not fields["canonical_gurmukhi"]:
+            raise HTTPException(400, "canonical_gurmukhi must not be empty")
+        fields["romanized"] = romanize(fields["canonical_gurmukhi"])
+    if "surface_forms" in fields:
+        fields["surface_forms"] = [f.strip() for f in fields["surface_forms"] if f.strip()]
+    if "confidence_threshold" in fields and not 0.0 <= fields["confidence_threshold"] <= 1.0:
+        raise HTTPException(400, "confidence_threshold must be within 0..1")
+    if not fields:
+        raise HTTPException(400, "nothing to update")
+    if repo.get_ledger(conn, ledger_id) is None:
+        raise HTTPException(404, "no such ledger entry")
+    repo.update_ledger(conn, ledger_id, **fields)
+    return {"ok": True}
+
+
+@app.get("/api/settings")
+def get_settings_endpoint(conn=Depends(get_conn)):
+    specs = [
+        {"key": s.key, "kind": s.kind, "default": s.default, "minimum": s.minimum,
+         "maximum": s.maximum, "help": s.help}
+        for s in appsettings.SPECS.values()
+    ]
+    return {"values": repo.get_all_settings(conn), "specs": specs}
+
+
+@app.put("/api/settings")
+def put_settings(body: SettingsBody, conn=Depends(get_conn)):
+    canonical: dict[str, str] = {}
+    for key, value in body.values.items():  # validate everything before writing anything
+        try:
+            canonical[key] = appsettings.validate(key, value)
+        except KeyError:
+            raise HTTPException(400, f"unknown setting: {key}") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+    for key, value in canonical.items():
+        repo.set_setting(conn, key, value)
+    return {"ok": True, "values": repo.get_all_settings(conn)}
